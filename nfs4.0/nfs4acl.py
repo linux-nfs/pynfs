@@ -349,6 +349,45 @@ def verify_acl(returned_acl, expected_acl):
                  access_mask_to_str(returned_ace.access_mask),
                  access_mask_to_str(missing)))
 
+def verify_mode_and_acl(attrs_dict, expected_acl, operation="operation"):
+    """Verify that MODE and ACL attributes match expectations
+
+    This helper encapsulates the common pattern of verifying both ACL
+    and mode derivation per RFC 8881 Section 6.3.2.
+
+    Args:
+        attrs_dict: Dictionary of attributes (must contain FATTR4_ACL and FATTR4_MODE)
+        expected_acl: The ACL that should be present
+        operation: Name of operation for error messages (default: "operation")
+
+    Returns:
+        tuple: (returned_mode, expected_mode) - both as integers with low 9 bits
+
+    Raises:
+        AssertionError: If verification fails
+    """
+    # Check that both attributes are present
+    if FATTR4_ACL not in attrs_dict:
+        raise AssertionError(
+            "ACL attribute not returned after %s" % operation)
+    if FATTR4_MODE not in attrs_dict:
+        raise AssertionError(
+            "MODE attribute not returned after %s" % operation)
+
+    # Verify ACL matches expected
+    verify_acl(attrs_dict[FATTR4_ACL], expected_acl)
+
+    # Verify mode matches RFC 8881 derivation from ACL
+    returned_mode = attrs_dict[FATTR4_MODE] & 0o777
+    expected_mode = acl2mode_rfc8881(attrs_dict[FATTR4_ACL])
+
+    if returned_mode != expected_mode:
+        raise AssertionError(
+            "MODE (0%o) does not match RFC 8881 §6.3.2 derivation "
+            "from ACL (expected 0%o)" % (returned_mode, expected_mode))
+
+    return returned_mode, expected_mode
+
 def printableacl(acl):
     type_str = ["ACCESS", "DENY"]
     out = ""
