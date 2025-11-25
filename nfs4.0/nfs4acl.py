@@ -310,6 +310,45 @@ def access_mask_to_str(mask):
     ]
     return " | ".join(name for bit, name in perms if mask & bit) or "(none)"
 
+def verify_acl(returned_acl, expected_acl):
+    """Verify that returned ACL contains expected ACEs
+
+    Server may add additional ACEs, but the requested ones must be present
+    with at least the requested permissions.
+
+    Raises AssertionError if verification fails.
+    """
+    if len(returned_acl) < len(expected_acl):
+        raise AssertionError(
+            "Returned ACL has fewer entries than requested: "
+            "expected at least %d, got %d" % (len(expected_acl), len(returned_acl)))
+
+    # Verify the ACEs we set are present (server may add additional ACEs)
+    for i, expected_ace in enumerate(expected_acl):
+        if i >= len(returned_acl):
+            raise AssertionError("Missing ACE %d in returned ACL" % i)
+        returned_ace = returned_acl[i]
+        if returned_ace.type != expected_ace.type:
+            raise AssertionError(
+                "ACE %d type mismatch: expected %d, got %d" %
+                (i, expected_ace.type, returned_ace.type))
+        if returned_ace.who != expected_ace.who:
+            raise AssertionError(
+                "ACE %d who mismatch: expected %s, got %s" %
+                (i, expected_ace.who, returned_ace.who))
+        # Check that requested permissions are present (server may add more)
+        if (returned_ace.access_mask & expected_ace.access_mask) != expected_ace.access_mask:
+            missing = expected_ace.access_mask & ~returned_ace.access_mask
+            raise AssertionError(
+                "ACE %d access_mask mismatch:\n"
+                "  Expected: %s\n"
+                "  Got:      %s\n"
+                "  Missing:  %s" %
+                (i,
+                 access_mask_to_str(expected_ace.access_mask),
+                 access_mask_to_str(returned_ace.access_mask),
+                 access_mask_to_str(missing)))
+
 def printableacl(acl):
     type_str = ["ACCESS", "DENY"]
     out = ""
