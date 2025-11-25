@@ -208,6 +208,66 @@ def chk_groups(acl, flags, not_mask):
             chk_triple(mask, allow, acl[0], flags | GROUP, not_mask)
         del acl[:1]
 
+def acl2mode_rfc8881(acl):
+    """
+    Compute mode from ACL according to RFC 8881 Section 6.3.2.
+
+    For each special identifier (OWNER@, GROUP@, EVERYONE@), evaluate the
+    ACL in order considering only ALLOW and DENY ACEs for EVERYONE@ and
+    the identifier under consideration. Then translate to mode bits:
+    - Read bit: Set if ACE4_READ_DATA is permitted
+    - Write bit: Set if BOTH ACE4_WRITE_DATA AND ACE4_APPEND_DATA are permitted
+    - Execute bit: Set if ACE4_EXECUTE is permitted
+
+    Returns the low-order 9 bits of the mode (user/group/other permissions).
+    """
+    identifiers = [
+        (b"OWNER@", MODE4_RUSR, MODE4_WUSR, MODE4_XUSR),
+        (b"GROUP@", MODE4_RGRP, MODE4_WGRP, MODE4_XGRP),
+        (b"EVERYONE@", MODE4_ROTH, MODE4_WOTH, MODE4_XOTH)
+    ]
+
+    mode = 0
+
+    for who, read_bit, write_bit, exec_bit in identifiers:
+        # Start with no permissions
+        allowed_mask = 0
+        denied_mask = 0
+
+        # Evaluate ACL in order, considering only ALLOW/DENY for this
+        # identifier and EVERYONE@
+        for ace in acl:
+            # Skip non-relevant ACEs
+            if ace.who not in (who, b"EVERYONE@"):
+                continue
+            if ace.type not in (ALLOWED, DENIED):
+                continue
+            # Skip inherit-only ACEs (they don't affect current permissions)
+            if ace.flag & ACE4_INHERIT_ONLY_ACE:
+                continue
+
+            if ace.type == ALLOWED:
+                # Add allowed permissions not already denied
+                allowed_mask |= (ace.access_mask & ~denied_mask)
+            elif ace.type == DENIED:
+                # Add denied permissions not already allowed
+                denied_mask |= (ace.access_mask & ~allowed_mask)
+
+        # Translate permitted mask to mode bits per RFC 8881 §6.3.2
+        # Read bit: ACE4_READ_DATA must be set
+        if allowed_mask & ACE4_READ_DATA:
+            mode |= read_bit
+
+        # Write bit: BOTH ACE4_WRITE_DATA and ACE4_APPEND_DATA must be set
+        if (allowed_mask & ACE4_WRITE_DATA) and (allowed_mask & ACE4_APPEND_DATA):
+            mode |= write_bit
+
+        # Execute bit: ACE4_EXECUTE must be set
+        if allowed_mask & ACE4_EXECUTE:
+            mode |= exec_bit
+
+    return mode
+
 def printableacl(acl):
     type_str = ["ACCESS", "DENY"]
     out = ""
