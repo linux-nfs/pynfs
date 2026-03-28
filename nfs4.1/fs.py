@@ -932,9 +932,11 @@ class ConfigFS(FileSystem):
 ###################################################
 
 import os
+import sys
 import pickle
 import shutil
 import shelve
+import dbm.gnu as gdbm
 
 class StubFS_Disk(FileSystem):
     _fs_data_name = b"fs_info" # DB name where we store persistent data
@@ -948,6 +950,16 @@ class StubFS_Disk(FileSystem):
             self._init(path)
         # XXX Note shelve DB is still open
 
+    def _dbpath(self, path):
+        """
+        generate proper dbpath format according python version.
+        see: https://docs.python.org/3.13/library/dbm.html#module-dbm.gnu
+        """
+        dbpath = os.path.join(path, self._fs_data_name)
+        if sys.version_info < (3, 11):
+            dbpath = dbpath.decode("utf-8")
+        return dbpath
+
     def _reset(self, path, fsid):
         """Create an empty fs, overwriting all existing data."""
         # Check path exists
@@ -959,8 +971,8 @@ class StubFS_Disk(FileSystem):
         shutil.rmtree(path)
         os.makedirs(path)
         # This needs to be open before calling __init__
-        d = self._fs_data = shelve.open(os.path.join(path, self._fs_data_name),
-                                        "n")
+        db = gdbm.open(self._dbpath(path), "n")
+        d = self._fs_data = shelve.Shelf(db)
         d["_nextid"] = self._nextid
         # normal __init__
         FileSystem.__init__(self)
@@ -980,8 +992,8 @@ class StubFS_Disk(FileSystem):
         if not os.path.isdir(path):
             raise RuntimeError("Path doesn't exist, try using '--reset' option")
         # Ensure persistent fs data exists there
-        d = self._fs_data = shelve.open(os.path.join(path, self._fs_data_name),
-                                        "w") # w needed for later allocation
+        db = gdbm.open(self._dbpath(path), "w") # w needed for later allocation
+        d = self._fs_data = shelve.Shelf(db)
         # Do __init__ portion that is needed
         self.objclass = FSObject
         self._disk_lock = Lock("FSLock(Disk)")
