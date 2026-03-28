@@ -46,7 +46,7 @@ class NFS4Proxy(rpc.Server):
             self.cb_versions = [cb_version]
             # currently support only root (? fix ? )
             rpcsec = rpc.security.instance(rpc.AUTH_SYS)
-            self.default_cred = rpcsec.init_cred(uid=0,gid=0,name="root")
+            self.default_cred = rpcsec.init_cred(uid=0,gid=0,name=b"root")
             if pipe: #reuse connection
                 self.pipe = pipe
             else:
@@ -60,7 +60,7 @@ class NFS4Proxy(rpc.Server):
             return (min(self.cb_versions), max(self.cb_versions))
 
         def _find_method(self, msg):
-            method = getattr(self.proxy, 'handle_cb_%i' % msg.proc, None)
+            method = getattr(self.proxy, b'handle_cb_%i' % msg.proc, None)
             if method is not None:
                 return method
             return None
@@ -162,8 +162,8 @@ class NFS4Proxy(rpc.Server):
             log.debug("** CALLBACK **")
         log.debug("Handling NULL")
         try:
-            self.forward_call(calldata="", callback=callback, procedure=0)
-            return rpc.SUCCESS, ''
+            self.forward_call(calldata=b"", callback=callback, procedure=0)
+            return rpc.SUCCESS, b''
         except rpc.RPCTimeout:
             log.critical("Error: cannot connect to destination server")
             return rpc.GARBAGE_ARGS, None
@@ -192,7 +192,7 @@ class NFS4Proxy(rpc.Server):
             env = CompoundState(args, cred)
         for arg in args.argarray:
             env.index += 1
-            opname = nfs_opnum4.get(arg.argop, 'op_illegal')
+            opname = nfs_opnum4.get(arg.argop, b'op_illegal')
             log.info("*** %s (%d) ***" % (opname, arg.argop))
             # look for functions implemented by the proxy
             # that override communication
@@ -210,7 +210,7 @@ class NFS4Proxy(rpc.Server):
             if error is not None:
                 result = encode_status_by_name(opname.lower()[3:],
                                             int(error),
-                                            msg="Proxy Rewrite Error")
+                                            msg=b"Proxy Rewrite Error")
                 env.results.append(result)
                 p = nfs4lib.FancyNFS4Packer()
                 if callback:
@@ -288,7 +288,7 @@ class NFS4Proxy(rpc.Server):
                     attrs.ca_maxoperations = chan.maxoperations
                 if chan.maxrequests < attrs.ca_maxrequests:
                     attrs.ca_maxrequests = chan.maxrequests
-            if direction is 0: # client to proxy
+            if direction == 0: # client to proxy
                 # XXX: this might be buggy with more than one clients (?)
                 self.start_cb_proxy(arg.opcreate_session.csa_cb_program,
                                     version=1, client_pipe=cred.connection)
@@ -296,7 +296,7 @@ class NFS4Proxy(rpc.Server):
                                        self.fchannel)
                 _adjust_channel_values(arg.opcreate_session.csa_back_chan_attrs,
                                        self.bchannel)
-            elif direction is 1: # proxy to client
+            elif direction == 1: # proxy to client
                 pass
 #FUNCTION OVERRIDING END
 
