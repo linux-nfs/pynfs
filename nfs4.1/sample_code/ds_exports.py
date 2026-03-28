@@ -6,4 +6,4 @@ from fs import StubFS_Mem
 
 def mount_stuff(server, opts):
     B = StubFS_Mem(2)
-    server.mount(B, path="/pynfs_mds")
+    server.mount(B, path=b"/pynfs_mds")
