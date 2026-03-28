@@ -21,7 +21,7 @@ POSIXLOCK = False
 SHARE, BYTE, DELEG, LAYOUT, ANON = range(5) # State types
 NORMAL, CB_INIT, CB_SENT, CB_RECEIVED, INVALID = range(5) # delegation/layout states
 
-DS_MAGIC = "\xa5" # STUB part of HACK code to ignore DS stateid
+DS_MAGIC = b"\xa5" # STUB part of HACK code to ignore DS stateid
 
 @contextmanager
 def find_state(env, stateid, allow_0=True, allow_bypass=False):
@@ -34,7 +34,7 @@ def find_state(env, stateid, allow_0=True, allow_bypass=False):
         # Could meddle with state.other here if needed
         anon = True
     # First we convert special stateids, see draft22 8.2.3
-    if stateid.other == "\0" * 12:
+    if stateid.other == b"\0" * 12:
         if allow_0 and stateid.seqid == 0:
             state = env.cfh.state.anon0
             anon = True
@@ -43,10 +43,10 @@ def find_state(env, stateid, allow_0=True, allow_bypass=False):
             # Special stateids must be passed in explicitly
             if stateid in [None, nfs4lib.state00, nfs4lib.state11]:
                 raise NFS4Error(NFS4ERR_BAD_STATEID,
-                                tag="Current stateid not useable")
+                                tag=b"Current stateid not useable")
         else:
             raise NFS4Error(NFS4ERR_BAD_STATEID)
-    elif stateid.other == "\xff" * 12:
+    elif stateid.other == b"\xff" * 12:
         if allow_0 and stateid.seqid == 0xffffffff:
             stateid = nfs4lib.state00 # Needed to pass seqid checks below
             state = (env.cfh.state.anon1 if allow_bypass else env.cfh.state.anon0)
@@ -57,31 +57,31 @@ def find_state(env, stateid, allow_0=True, allow_bypass=False):
         # Now map stateid to find state
         state = env.session.client.state.get(stateid.other, None)
         if state is None:
-            raise NFS4Error(NFS4ERR_BAD_STATEID, tag="stateid not known")
+            raise NFS4Error(NFS4ERR_BAD_STATEID, tag=b"stateid not known")
         if state.file != env.cfh:
             raise NFS4Error(NFS4ERR_BAD_STATEID,
-                            tag="cfh %r does not match stateid %r" %
+                            tag=b"cfh %r does not match stateid %r" %
                             (state.file.fh, env.cfh.fh))
     state.lock.acquire()
     # It is possible that while waiting to get the lock, the state has been
     # removed.  In that case, the removal sets the invalid flag.
     if state.invalid:
         state.release()
-        raise NFS4Error(NFS4ERR_BAD_STATEID, tag="stateid not known (race)")
+        raise NFS4Error(NFS4ERR_BAD_STATEID, tag=b"stateid not known (race)")
     if state.type != LAYOUT:
         # See draft22 8.2.2
         if stateid.seqid != 0 and stateid.seqid != state.seqid:
             old = (stateid.seqid < state.seqid)
             state.lock.release()
             if old:
-                raise NFS4Error(NFS4ERR_OLD_STATEID, tag="bad stateid.seqid")
+                raise NFS4Error(NFS4ERR_OLD_STATEID, tag=b"bad stateid.seqid")
             else:
-                raise NFS4Error(NFS4ERR_BAD_STATEID, tag="bad stateid.seqid")
+                raise NFS4Error(NFS4ERR_BAD_STATEID, tag=b"bad stateid.seqid")
     else:
         # See draft22 12.5.3
         if stateid.seqid == 0:
             state.lock.release()
-            raise NFS4Error(NFS4ERR_BAD_STATEID, tag="layout stateid.seqid==0")
+            raise NFS4Error(NFS4ERR_BAD_STATEID, tag=b"layout stateid.seqid==0")
     try:
         yield state
     finally:
@@ -215,10 +215,10 @@ class DictTree(object):
     def itervalues(self):
         def myiter(d, depth):
             if depth == 1:
-                for value in d.itervalues():
+                for value in d.values():
                     yield value
             else:
-                for sub_d in d.itervalues():
+                for sub_d in d.values():
                     for i in myiter(sub_d, depth - 1):
                         yield i
         for i in myiter(self._data, self._depth):
@@ -250,7 +250,7 @@ class FileStateTyped(object):
         # NOTE we are only using 9 bytes of 12
         # NOTE this needs to be client-wide, since keys of client.state[]
         # must be unique
-        return "%s%s" % (struct.pack("!xxxB", self.type),
+        return b"%s%s" % (struct.pack("!xxxB", self.type),
                          client.get_new_other())
 
     def grab_entry(self, key, klass):
@@ -290,13 +290,13 @@ class DelegState(FileStateTyped):
             return True
         # Find any delegation - use fact that all are of same type
         for e in self._tree.itervalues():
+            # The only thing that doesn't conflict is access==READ with READ deleg
+            if e.deleg_type == OPEN_DELEGATE_READ and \
+                    not (access & OPEN4_SHARE_ACCESS_WRITE):
+                return False
+            else:
+                return True
             break
-        # The only thing that doesn't conflict is access==READ with READ deleg
-        if e.deleg_type == OPEN_DELEGATE_READ and \
-                not (access & OPEN4_SHARE_ACCESS_WRITE):
-            return False
-        else:
-            return True
 
     def recall_conflicting_delegations(self, dispatcher, client, access, deny):
         # NOTE OK to have extra access/deny flags
@@ -342,8 +342,8 @@ class AnonState(FileStateTyped):
     def __init__(self, *args, **kwargs):
         kwargs["depth"] = 1 # key = (int,)
         FileStateTyped.__init__(self, *args, **kwargs)
-        self._tree[(0 ,)] = AnonEntry("\x00" * 12, self, (0,))
-        self._tree[(1 ,)] = AnonEntry("\xff" * 12, self, (1,))
+        self._tree[(0 ,)] = AnonEntry(b"\x00" * 12, self, (0,))
+        self._tree[(1 ,)] = AnonEntry(b"\xff" * 12, self, (1,))
         self._tree[(DS_MAGIC, )] = DSEntry(DS_MAGIC * 12, self, (DS_MAGIC, ))
 
 class ShareState(FileStateTyped):
@@ -686,9 +686,9 @@ class ShareEntry(StateTableEntry):
 #             # This test is the whole reason for the silly 3-bit
 #             # representation.  It basically prevents the seqence
 #             # OPEN(share=BOTH), OPENDOWNGRADE(share=SINGLE).
-#             raise NFS4Error(NFS4ERR_INVAL, tag="Failed history test")
+#             raise NFS4Error(NFS4ERR_INVAL, tag=b"Failed history test")
 #         if access == 0 and deny != 0:
-#             raise NFS4Error(NFS4ERR_INVAL, tag="access==0")
+#             raise NFS4Error(NFS4ERR_INVAL, tag=b"access==0")
 #         self.access_hist, self.deny_hist = new_access, new_deny
 #         self.share_access, self.share_deny = access, deny
 

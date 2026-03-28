@@ -59,27 +59,27 @@ class DataServer(object):
 
     def get_netaddr4(self):
         # STUB server multipathing not supported yet
-        uaddr = '.'.join([self.server,
-                          str(self.port >> 8),
-                          str(self.port & 0xff)])
-        return type4.netaddr4(self.proto, uaddr)
+        uaddr = b'.'.join([self.server.encode("utf-8"),
+                          str(self.port >> 8).encode("utf-8"),
+                          str(self.port & 0xff).encode("utf-8")])
+        return type4.netaddr4(self.proto.encode("utf-8"), uaddr)
 
     def get_multipath_netaddr4s(self):
         netaddr4s = []
         for addr in self.multipath_servers:
             server, port = addr
-            uaddr = '.'.join([server,
-                            str(port >> 8),
-                            str(port & 0xff)])
-            proto = "tcp"
+            uaddr = b'.'.join([server.encode("utf-8"),
+                            str(port >> 8).encode("utf-8"),
+                            str(port & 0xff).encode("utf-8")])
+            proto = b"tcp"
             if server.find(':') >= 0:
-                proto = "tcp6"
+                proto = b"tcp6"
 
             netaddr4s.append(type4.netaddr4(proto, uaddr))
         return netaddr4s
 
     def fh_to_name(self, mds_fh):
-        return hashlib.sha1("%r" % mds_fh).hexdigest()
+        return hashlib.sha1(mds_fh).hexdigest()
 
     def connect(self):
         raise NotImplemented
@@ -111,7 +111,7 @@ class DataServer41(DataServer):
                 self.reset()
             else:
                 log.error("Unhandled status %s from DS %s" %
-                          (nfsstat4[res.status], self.server))
+                          (const4.nfsstat4[res.status], self.server))
                 raise Exception("Dataserver communication error")
 
     def connect(self):
@@ -122,7 +122,7 @@ class DataServer41(DataServer):
                                         summary=self.summary)
         self.c1.set_cred(self.cred1)
         self.c1.null()
-        c = self.c1.new_client("DS.init_%s" % self.server)
+        c = self.c1.new_client(b"DS.init_%s" % self.server.encode("utf-8"))
         # This is a hack to ensure MDS/DS communication path is at least
         # as wide as the client/MDS channel (at least for linux client)
         fore_attrs = type4.channel_attrs4(0, 16384, 16384, 2868, 8, 8, [])
@@ -154,11 +154,11 @@ class DataServer41(DataServer):
         access = const4.OPEN4_SHARE_ACCESS_BOTH
         deny = const4.OPEN4_SHARE_DENY_NONE
         attrs = {const4.FATTR4_MODE: 0o777}
-        owner = "mds"
+        owner = b"mds"
         mode = const4.GUARDED4
         verifier = self.sess.c.verifier
         openflag = type4.openflag4(const4.OPEN4_CREATE, type4.createhow4(mode, attrs, verifier))
-        name = self.fh_to_name(mds_fh)
+        name = self.fh_to_name(mds_fh).encode("utf-8")
         while True:
             if mds_fh in self.filehandles:
                 return
@@ -338,14 +338,14 @@ class DSDevice(object):
                 server_list = server_list[:-1]
                 try:
                     log.info("Adding dataserver ip:%s port:%s path:%s" %
-                             (server, port, '/'.join(path)))
+                             (server, port, b'/'.join(path)))
                     ds = DataServer41(server, port, path, mdsds=self.mdsds,
                                     multipath_servers=server_list,
                                     summary=server_obj.summary)
                     self.list.append(ds)
                 except socket.error:
                     log.critical("cannot access %s:%i/%s" %
-                                 (server, port, '/'.join(path)))
+                                 (server, port, b'/'.join(path)))
                     sys.exit(1)
         self.active = 1
         self.address_body = self._get_address_body()

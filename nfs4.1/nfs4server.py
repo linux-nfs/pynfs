@@ -16,16 +16,24 @@ import random
 import struct
 import collections
 import logging
-from nfs4state import find_state
+from nfs4state import find_state, SHARE, BYTE
 from nfs4commoncode import CompoundState, encode_status, encode_status_by_name
 from fs import RootFS, ConfigFS
 from config import ServerConfig, ServerPerClientConfig, OpsConfigServer, Actions
 
-logging.basicConfig(level=logging.WARN,
+logging.basicConfig(level=logging.DEBUG,
                     format="%(levelname)-7s:%(name)s:%(message)s")
 log_41 = logging.getLogger("nfs.server")
 
 log_cfg = logging.getLogger("nfs.server.opconfig")
+
+def _hasattr(obj, attr):
+    try:
+        getattr(obj, attr)
+        return True
+    except:
+        pass
+    return False
 
 ##################################################
 # Set various global constants and magic numbers #
@@ -365,7 +373,7 @@ class SessionRecord(object):
     """The server's representation of a session and its state"""
     def __init__(self, client, csa):
         self.client = client # reference back to client which created this session
-        self.sessionid = "%08x%08x" % (client.clientid,
+        self.sessionid = b"%08x%08x" % (client.clientid,
                                     client.session_replay.seqid) # XXX does this work?
         self.channel_fore = Channel(csa.csa_fore_chan_attrs, client.config) # Normal communication
         self.channel_back = Channel(csa.csa_back_chan_attrs, client.config) # Callback communication
@@ -574,14 +582,14 @@ class NFS4Server(rpc.Server):
         self.config = ServerConfig()
         self.opsconfig = OpsConfigServer()
         self.actions = Actions()
-        self.mount(ConfigFS(self), path="/config")
+        self.mount(ConfigFS(self), path=b"/config")
         self.verifier = struct.pack('>d', time.time())
         self.recording = Recording()
         self.devid_counter = Counter(name="devid_counter")
         self.devids = {} # {devid: device}
         # default cred for the backchannel -- currently supports only AUTH_SYS
         rpcsec = rpc.security.instance(rpc.AUTH_SYS)
-        self.default_cred = rpcsec.init_cred(uid=4321,gid=42,name="mystery")
+        self.default_cred = rpcsec.init_cred(uid=4321,gid=42,name=b"mystery")
         self.err_inc_dict = self.init_err_inc_dict()
 
     def start(self):
@@ -796,7 +804,7 @@ class NFS4Server(rpc.Server):
         self.check_utf8str_cs(str)
         if not str:
             raise NFS4Error(NFS4ERR_INVAL, tag="Empty component")
-        if '/' in str:
+        if b'/' in str:
             raise NFS4Error(NFS4ERR_BADCHAR)
 
     def op_compound(self, args, cred):
@@ -808,7 +816,7 @@ class NFS4Server(rpc.Server):
             return env
         try:
             self.check_utf8str_cs(args.tag)
-        except NFS4Errror as e:
+        except NFS4Error as e:
             env.results.set_empty_return(e.status, "Invalid utf8 tag")
             return env
         # Handle the individual operations
@@ -834,10 +842,10 @@ class NFS4Server(rpc.Server):
                     # catch error themselves to encode properly.
                     result = encode_status_by_name(opname.lower()[3:],
                                                    e.status, msg=e.tag)
-                except NFS4Replay:
+                except NFS4Replay as e:
                     # Just pass this on up
                     raise
-                except Exception:
+                except Exception as e:
                     # Uh-oh.  This is a server bug
                     traceback.print_exc()
                     result = encode_status_by_name(opname.lower()[3:],
@@ -919,7 +927,7 @@ class NFS4Server(rpc.Server):
         check_session(env, unique=True)
         if arg.csa_flags & ~nfs4lib.create_session_mask:
             return encode_status(NFS4ERR_INVAL,
-                                 msg="Unknown bits set in flag")
+                                 msg=b"Unknown bits set in flag")
         # Step 1: Client record lookup
         c = self.clients[arg.csa_clientid]
         if c is None: # STUB - or if c.frozen ???
@@ -982,13 +990,13 @@ class NFS4Server(rpc.Server):
         if protect.type != SP4_SSV:
             # Per draft26 18.47.3
             return encode_status(NFS4ERR_INVAL,
-                                 msg="Did not request SP4_SSV protection")
+                                 msg=b"Did not request SP4_SSV protection")
         # Do some argument checking
         size = protect.context.ssv_len
         if len(arg.ssa_ssv) != size:
-            return encode_status(NFS4ERR_INVAL, msg="SSV size != %i" % size)
+            return encode_status(NFS4ERR_INVAL, msg=b"SSV size != %i" % size)
         if arg.ssa_ssv == "\0" * size:
-            return encode_status(NFS4ERR_INVAL, msg="SSV==0 not allowed")
+            return encode_status(NFS4ERR_INVAL, msg=b"SSV==0 not allowed")
         # Now we need to compute and check digest, using SEQUENCE args
         p = nfs4lib.FancyNFS4Packer()
         p.pack_SEQUENCE4args(env.argarray[0].opsequence)
@@ -1009,10 +1017,10 @@ class NFS4Server(rpc.Server):
         check_session(env, unique=True)
         # Check arguments for blatent errors
         if arg.eia_flags & ~nfs4lib.exchgid_mask:
-            return encode_status(NFS4ERR_INVAL, msg="Unknown flag")
+            return encode_status(NFS4ERR_INVAL, msg=b"Unknown flag")
         if arg.eia_flags & EXCHGID4_FLAG_CONFIRMED_R:
             return encode_status(NFS4ERR_INVAL,
-                                 msg="Client used server-only flag")
+                                 msg=b"Client used server-only flag")
         if arg.eia_client_impl_id:
             impl_id = arg.eia_client_impl_id[0]
             self.check_utf8str_cis(impl_id.nii_domain)
@@ -1034,7 +1042,7 @@ class NFS4Server(rpc.Server):
             if c is None:
                 if update:
                     # Case 7
-                    return encode_status(NFS4ERR_NOENT, msg="No such client")
+                    return encode_status(NFS4ERR_NOENT, msg=b"No such client")
                 else:
                     # The simple, common case 1: a new client
                     c = self.clients.add(arg, env.principal, self.sec_flavors)
@@ -1042,7 +1050,7 @@ class NFS4Server(rpc.Server):
                 if update:
                     # Case 7
                     return encode_status(NFS4ERR_NOENT,
-                                         msg="Client not confirmed")
+                                         msg=b"Client not confirmed")
                 else:
                     # Case 4
                     self.clients.remove(c.clientid)
@@ -1057,11 +1065,11 @@ class NFS4Server(rpc.Server):
                     if c.verifier != verf:
                         # Case 8
                         return encode_status(NFS4ERR_NOT_SAME,
-                                             msg="Verifier mismatch")
+                                             msg=b"Verifier mismatch")
                     elif c.principal != env.principal:
                         # Case 9
                         return encode_status(NFS4ERR_PERM,
-                                             msg="Principal mismatch")
+                                             msg=b"Principal mismatch")
                     else:
                         # Case 6 - update
                         c.update(arg, env.principal)
@@ -1069,7 +1077,7 @@ class NFS4Server(rpc.Server):
                     # Case 3
                     # STUB - need to check state
                     return encode_status(NFS4ERR_CLID_INUSE,
-                                         msg="Principal mismatch")
+                                         msg=b"Principal mismatch")
                 elif c.verifier != verf:
                     # Case 5
                     # Confirmed client reboot: this is the hard case
@@ -1103,7 +1111,7 @@ class NFS4Server(rpc.Server):
                                 c.protection.rv(arg.eia_state_protect),
                                 self.config._owner, self.config.scope,
                                 [self.config.impl_id])
-        return encode_status(NFS4_OK, res, msg="draft21")
+        return encode_status(NFS4_OK, res, msg=b"draft21")
 
     def client_reboot(self, c):
         # STUB - locking?
@@ -1143,9 +1151,9 @@ class NFS4Server(rpc.Server):
             if arg.bctsa_digest:
                 # QUESTION _INVAL or _BAD_SESSION_DIGEST also possible
                 return encode_status(NFS4ERR_CONN_BINDING_NOT_ENFORCED,
-                                     msg="Expected zero length digest")
+                                     msg=b"Expected zero length digest")
             if arg.bctsa_step1 is False:
-                return encode_status(NFS4ERR_INVAL, msg="Expected step1==True")
+                return encode_status(NFS4ERR_INVAL, msg=b"Expected step1==True")
             dir = bind_to_channels(arg.bctsa_dir)
             nonce = session.get_nonce(connection, [arg.bctsa_nonce])
             # STUB this should be a session method
@@ -1175,9 +1183,9 @@ class NFS4Server(rpc.Server):
                 old_s_nonce, old_c_nonce = session.nonce[connection]
             except KeyError:
                 return encode_status(NFS4ERR_INVAL,
-                                     msg="server has no record of step1")
+                                     msg=b"server has no record of step1")
             if old_c_nonce == arg.bctsa_nonce:
-                return encode_status(NFS4ERR_INVAL, msg="Client reused nonce")
+                return encode_status(NFS4ERR_INVAL, msg=b"Client reused nonce")
             p = nfs4lib.FancyNFS4Packer()
             p.pack_bctsr_digest_input4(bctsr_digest_input4(arg.bctsa_sessid,
                                                            arg.bctsa_nonce,
@@ -1208,8 +1216,7 @@ class NFS4Server(rpc.Server):
         check_session(env)
         # xxx add gss support
         secinfo4_list = [ secinfo4(rpc.AUTH_SYS) ]
-        res = SECINFO_NO_NAME4res(NFS4_OK, secinfo4_list)
-        return encode_status(NFS4_OK, res)
+        return encode_status(NFS4_OK, secinfo4_list)
 
     # op_putpubfh SHOULD be the same as op_putrootfh
     # See draft23, section 18.20.3, line 25005
@@ -1356,14 +1363,14 @@ class NFS4Server(rpc.Server):
         claim_type = arg.claim.claim
         if claim_type != CLAIM_NULL and arg.openhow.opentype == OPEN4_CREATE:
             return encode_status(NFS4ERR_INVAL,
-                                 msg="OPEN4_CREATE not compatible with %s" %
+                                 msg=b"OPEN4_CREATE not compatible with %s" %
                                  open_claim_type4[claim_type])
         # emulate switch(claim_type)
         try:
             func = getattr(self,
                            "open_%s" % open_claim_type4[claim_type].lower())
         except AttributeError:
-            return encode_status(NFS4ERR_NOTSUPP, msg="Unsupported claim type")
+            return encode_status(NFS4ERR_NOTSUPP, msg=b"Unsupported claim type")
         existing, cinfo, bitmask = func(arg, env)
         # existing now points to file we want to open
         if existing is None:
@@ -1462,7 +1469,7 @@ class NFS4Server(rpc.Server):
             ace = nfsace4(ACE4_ACCESS_DENIED_ACE_TYPE, 0,
                           ACE4_GENERIC_EXECUTE |
                           ACE4_GENERIC_WRITE | ACE4_GENERIC_READ,
-                          "EVERYONE@")
+                          b"EVERYONE@")
             deleg = open_read_delegation4(entry.get_id(), False, ace)
             return open_delegation4(entry.deleg_type, deleg)
 
@@ -1511,7 +1518,7 @@ class NFS4Server(rpc.Server):
             else:
                 base = obj
             name = "fattr4_%s" % nfs4lib.attr_name(attr)
-            if hasattr(base, name) and (obj.fs.fattr4_supported_attrs & 1<<attr): # STUB we should be able to remove hasattr
+            if _hasattr(base, name) and (obj.fs.fattr4_supported_attrs & 1<<attr): # STUB we should be able to remove hasattr
                 ret_dict[attr] = getattr(base, name)
             else:
                 if ignore:
@@ -1557,7 +1564,7 @@ class NFS4Server(rpc.Server):
         check_cfh(env)
         env.cfh.check_dir()
         if arg.cookie in (1, 2) or \
-               (arg.cookie==0 and arg.cookieverf != "\0" * 8):
+               (arg.cookie==0 and arg.cookieverf != b"\0" * 8):
             return encode_status(NFS4ERR_BAD_COOKIE)
         objlist, verifier = env.cfh.readdir(arg.cookieverf, env.session.client, env.principal) # (name, obj) pairs
         # STUB - think through rdattr_error handling
@@ -1690,7 +1697,7 @@ class NFS4Server(rpc.Server):
         check_session(env)
         check_cfh(env)
         if env.cfh.fattr4_type != NF4LNK:
-            return encode_status(NFS4_INVAL, msg="cfh type was %i" % i)
+            return encode_status(NFS4_INVAL, msg=b"cfh type was %i" % i)
         res = READLINK4resok(env.cfh.linkdata)
         return encode_status(NFS4_OK, res)
 
@@ -1734,7 +1741,7 @@ class NFS4Server(rpc.Server):
         self.check_component(arg.newname)
         if not nfs4lib.test_equal(env.sfh.fattr4_fsid, env.cfh.fattr4_fsid,
                                   kind="fsid4"):
-            return encode_status(NFS4ERR_XDEV, msg="%r != %r" % (env.sfh.fattr4_fsid, env.cfh.fattr4_fsid))
+            return encode_status(NFS4ERR_XDEV, msg=b"%r != %r" % (env.sfh.fattr4_fsid, env.cfh.fattr4_fsid))
         order = sorted(set([env.cfh, env.sfh])) # Used to prevent locking problems
         # BUG fs locking
         old_change_src = env.sfh.fattr4_change
@@ -1891,10 +1898,10 @@ class NFS4Server(rpc.Server):
             check_session(env)
             check_cfh(env)
             if arg.loga_length == 0:
-                return encode_status(NFS4_INVAL, msg="length == 0")
+                return encode_status(NFS4_INVAL, msg=b"length == 0")
             if arg.loga_length != 0xffffffffffffffff:
                 if arg.loga_length + arg.loga_offset > 0xffffffffffffffff:
-                     return encode_status(NFS4_INVAL, msg="offset+length too big")
+                     return encode_status(NFS4_INVAL, msg=b"offset+length too big")
             if not env.session.has_backchannel:
                 raise NFS4Error(NFS4ERR_LAYOUTTRYLATER)
             # STUB do state locking and check on iomode,offset,length triple
@@ -2047,7 +2054,7 @@ class NFS4Server(rpc.Server):
         # "The server MUST specify...an ONC RPC version number equal to 4",
         # Per the May 17, 2010 discussion on the ietf list, errataID 2291
         # indicates it should in fact be 1
-        return pipe.send_call(prog, 1, 0, "", credinfo)
+        return pipe.send_call(prog, 1, 0, b"", credinfo)
 
     def cb_null(self, prog, pipe, credinfo=None):
         """ Sends bc_null."""

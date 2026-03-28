@@ -183,7 +183,7 @@ class NFS4Client(rpc.Client, rpc.Server):
                 return env
         try:
             self.check_utf8str_cs(args.tag)
-        except NFS4Errror as e:
+        except NFS4Error as e:
             env.results.set_empty_return(e.status, "Invalid utf8 tag")
             return env
         # Handle the individual operations
@@ -211,7 +211,7 @@ class NFS4Client(rpc.Client, rpc.Server):
                 except NFS4Replay:
                     # Just pass this on up
                     raise
-                except Exception:
+                except StandardError:
                     # Uh-oh.  This is a server bug
                     traceback.print_exc()
                     result = encode_status_by_name(opname.lower()[3:],
