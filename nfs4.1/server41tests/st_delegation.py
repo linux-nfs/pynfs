@@ -352,6 +352,9 @@ def _testCbGetattr(t, env, change=0, size=0):
 
     fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t), openmask)
     print("__create_file_with_deleg: ", fh, stateid, deleg)
+    delegtype = deleg.delegation_type
+    if delegtype != OPEN_DELEGATE_WRITE_ATTRS_DELEG and delegtype != OPEN_DELEGATE_WRITE:
+        fail("Didn't get a write delegation.")
     attrs1 = do_getattrdict(sess1, fh, [FATTR4_CHANGE, FATTR4_SIZE,
                                         FATTR4_TIME_ACCESS, FATTR4_TIME_MODIFY])
 
@@ -363,7 +366,7 @@ def _testCbGetattr(t, env, change=0, size=0):
         if size > 0:
             cbattrs[FATTR4_SIZE] = size
 
-    if openmask & 1<<OPEN_ARGS_SHARE_ACCESS_WANT_DELEG_TIMESTAMPS:
+    if delegtype == OPEN_DELEGATE_WRITE_ATTRS_DELEG:
         cbattrs[FATTR4_TIME_DELEG_ACCESS] = attrs1[FATTR4_TIME_ACCESS]
         cbattrs[FATTR4_TIME_DELEG_MODIFY] = attrs1[FATTR4_TIME_MODIFY]
         if change != 0:
