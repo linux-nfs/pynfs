@@ -84,6 +84,8 @@ def testLockSleepLock(t, env):
     res = sess2.compound(cour_lockargs(fh, stateid))
     check(res, NFS4_OK)
 
+    close_file(sess2, fh, stateid=stateid)
+
 def testShareReservation00(t, env):
     """Test OPEN file with OPEN4_SHARE_DENY_WRITE
        1st client opens file with OPEN4_SHARE_DENY_WRITE
