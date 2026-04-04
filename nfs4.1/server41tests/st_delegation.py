@@ -2,7 +2,7 @@ from .st_create_session import create_session
 from .st_open import open_claim4
 from xdrdef.nfs4_const import *
 
-from .environment import check, fail, create_file, open_file, close_file, do_getattrdict, close_file, write_file, read_file
+from .environment import check, fail, create_file, open_file, close_file, do_getattrdict, close_file, write_file, read_file, compareTimes
 from xdrdef.nfs4_type import *
 import nfs_ops
 op = nfs_ops.NFS4ops()
@@ -367,8 +367,10 @@ def _testCbGetattr(t, env, change=0, size=0):
             cbattrs[FATTR4_SIZE] = size
 
     if delegtype == OPEN_DELEGATE_WRITE_ATTRS_DELEG:
-        cbattrs[FATTR4_TIME_DELEG_ACCESS] = attrs1[FATTR4_TIME_ACCESS]
-        cbattrs[FATTR4_TIME_DELEG_MODIFY] = attrs1[FATTR4_TIME_MODIFY]
+        cbattrs[FATTR4_TIME_DELEG_ACCESS] = nfstime4(attrs1[FATTR4_TIME_ACCESS].seconds,
+                                                     attrs1[FATTR4_TIME_ACCESS].nseconds)
+        cbattrs[FATTR4_TIME_DELEG_MODIFY] = nfstime4(attrs1[FATTR4_TIME_MODIFY].seconds,
+                                                     attrs1[FATTR4_TIME_MODIFY].nseconds)
         if change != 0:
             cbattrs[FATTR4_TIME_DELEG_ACCESS].seconds += 1
             cbattrs[FATTR4_TIME_DELEG_MODIFY].seconds += 1
@@ -401,12 +403,11 @@ def testCbGetattrNoChange(t, env):
     """
     attrs1, attrs2 = _testCbGetattr(t, env)
     if attrs1[FATTR4_SIZE] != attrs2[FATTR4_SIZE]:
-        fail("Bad size: %u != %u" % (attrs1[FATTR4_SIZE], attrs2[FATTR4_SIZE]))
+        fail(f"Bad size: {attrs1[FATTR4_SIZE]} != {attrs2[FATTR4_SIZE]}")
     if attrs1[FATTR4_CHANGE] != attrs2[FATTR4_CHANGE]:
-        fail("Bad change attribute: %u != %u" % (attrs1[FATTR4_CHANGE], attrs2[FATTR4_CHANGE]))
-    if FATTR4_TIME_DELEG_MODIFY in attrs2:
-        if attrs1[FATTR4_TIME_MODIFY] != attrs2[FATTR4_TIME_DELEG_MODIFY]:
-            fail("Bad modify time: ", attrs1[FATTR4_TIME_MODIFY], " != ", attrs2[FATTR4_TIME_DELEG_MODIFY])
+        fail(f"Bad change attribute: {attrs1[FATTR4_CHANGE]} != {attrs2[FATTR4_CHANGE]}")
+    if compareTimes(attrs1[FATTR4_TIME_MODIFY], attrs2[FATTR4_TIME_MODIFY]) != 0:
+        fail(f"Bad modify time: {attrs1[FATTR4_TIME_MODIFY]} != {attrs2[FATTR4_TIME_MODIFY]}")
 
 def testCbGetattrWithChange(t, env):
     """Test CB_GETATTR with simulated changes to file
@@ -420,12 +421,11 @@ def testCbGetattrWithChange(t, env):
     """
     attrs1, attrs2 = _testCbGetattr(t, env, change=1, size=5)
     if attrs2[FATTR4_SIZE] != 5:
-        fail("Bad size: %u != 5" % attrs2[FATTR4_SIZE])
+        fail(f"Bad size: {attrs2[FATTR4_SIZE]} != 5")
     if attrs1[FATTR4_CHANGE] == attrs2[FATTR4_CHANGE]:
-        fail("Bad change attribute: %u == %u" % (attrs1[FATTR4_CHANGE], attrs2[FATTR4_CHANGE]))
-    if FATTR4_TIME_DELEG_MODIFY in attrs2:
-        if attrs1[FATTR4_TIME_MODIFY] == attrs2[FATTR4_TIME_DELEG_MODIFY]:
-            fail("Bad modify time: ", attrs1[FATTR4_TIME_MODIFY], " == ", attrs2[FATTR4_TIME_DELEG_MODIFY])
+        fail(f"Bad change attribute: {attrs1[FATTR4_CHANGE]} == {attrs2[FATTR4_CHANGE]}")
+    if compareTimes(attrs1[FATTR4_TIME_MODIFY], attrs2[FATTR4_TIME_MODIFY]) == 0:
+        fail(f"Bad modify time: {attrs1[FATTR4_TIME_MODIFY]} == {attrs2[FATTR4_TIME_MODIFY]}")
 
 def testDelegReadAfterClose(t, env):
     """Test read with delegation stateid after close
