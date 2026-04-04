@@ -17,18 +17,20 @@ def __create_file_with_deleg(sess, name, access):
     res = create_file(sess, name, access = access)
     check(res)
     fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
     deleg = res.resarray[-2].delegation
     if (not _got_deleg(deleg)):
         res = open_file(sess, name, access = access)
         fh = res.resarray[-1].object
+        stateid = res.resarray[-2].stateid
         deleg = res.resarray[-2].delegation
         if (not _got_deleg(deleg)):
             fail("Could not get delegation")
-    return (fh, deleg)
+    return (fh, stateid, deleg)
 
 def _create_file_with_deleg(sess, name, access):
-    fh, deleg = __create_file_with_deleg(sess, name, access)
-    return fh
+    fh, stateid, deleg = __create_file_with_deleg(sess, name, access)
+    return (fh, stateid)
 
 def _testDeleg(t, env, openaccess, want, breakaccess, sec = None, sec2 = None):
     recall = threading.Event()
@@ -43,7 +45,7 @@ def _testDeleg(t, env, openaccess, want, breakaccess, sec = None, sec2 = None):
     sess1.client.cb_post_hook(OP_CB_RECALL, post_hook)
     if sec2:
         sess1.compound([op.backchannel_ctl(env.c1.prog, sec2)])
-    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)
+    fh, stateid = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
     claim = open_claim4(CLAIM_NULL, env.testname(t))
     owner = open_owner4(0, b"My Open Owner 2")
@@ -62,6 +64,7 @@ def _testDeleg(t, env, openaccess, want, breakaccess, sec = None, sec2 = None):
     check(res, [NFS4_OK, NFS4ERR_DELAY])
     if not completed:
         fail("delegation break not received")
+    close_file(sess1, fh, stateid=stateid)
     return recall
 
 def testReadDeleg(t, env):
@@ -103,6 +106,7 @@ def testNoDeleg(t, env):
                       OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
     check(res)
     fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
     deleg = res.resarray[-2].delegation
     if deleg.delegation_type == OPEN_DELEGATE_NONE:
         fail("Got no delegation, expected OPEN_DELEGATE_NONE_EXT")
@@ -110,6 +114,7 @@ def testNoDeleg(t, env):
         fail("Got a delegation (type "+str(deleg.delegation_type)+") despite asking for none")
     if deleg.ond_why != WND4_NOT_WANTED:
         fail("Wrong reason ("+str(deleg.ond_why)+") for giving no delegation")
+    close_file(sess1, fh, stateid=stateid)
 
 
 def testCBSecParms(t, env):
@@ -170,7 +175,7 @@ def testDelegRevocation(t, env):
     """
 
     sess1 = env.c1.new_client_session(b"%s_1" % env.testname(t))
-    fh, deleg = __create_file_with_deleg(sess1, env.testname(t),
+    fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t),
             OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
     delegstateid = deleg.read.stateid
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
@@ -180,7 +185,7 @@ def testDelegRevocation(t, env):
     open_op = op.open(0, OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE,
                         owner, how, claim)
     while 1:
-        res = sess2.compound(env.home + [open_op])
+        res = sess2.compound(env.home + [open_op, op.getfh()])
         if res.status == NFS4_OK:
             break;
         check(res, [NFS4_OK, NFS4ERR_DELAY])
@@ -188,6 +193,12 @@ def testDelegRevocation(t, env):
         # depend on the above compound waiting no longer than the
         # server's lease period:
         res = sess1.compound([])
+    if res.status == NFS4_OK:
+        fh2 = res.resarray[-1].object
+        stateid2 = res.resarray[-2].stateid
+    else:
+        fh2 = None
+        stateid2 = None
     res = sess1.compound([op.putfh(fh), op.read(delegstateid, 0, 1000)])
     check(res, NFS4ERR_DELEG_REVOKED, "Read with a revoked delegation")
     slot, seq_op = sess1._prepare_compound({})
@@ -217,6 +228,10 @@ def testDelegRevocation(t, env):
     if flags & ~SEQ4_STATUS_RECALLABLE_STATE_REVOKED:
         print("WARNING: unexpected status flag(s) 0x%x set" % flags)
 
+    close_file(sess1, fh, stateid=stateid)
+    if fh2 is not None and stateid2 is not None:
+        close_file(sess2, fh2, stateid=stateid2)
+
 def testWriteOpenvsReadDeleg(t, env):
     """Ensure that a write open prevents granting a read delegation
 
@@ -228,19 +243,27 @@ def testWriteOpenvsReadDeleg(t, env):
     owner = b"owner_%s" % env.testname(t)
     res = create_file(sess1, owner, access=OPEN4_SHARE_ACCESS_WRITE)
     check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
 
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
     access = OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG;
     res = open_file(sess2, owner, access = access)
     check(res)
+    fh2 = res.resarray[-1].object
+    stateid2 = res.resarray[-2].stateid
 
     deleg = res.resarray[-2].delegation
     if (not _got_deleg(deleg)):
         res = open_file(sess2, owner, access = access)
-        fh = res.resarray[-1].object
+        fh2 = res.resarray[-1].object
+        stateid2 = res.resarray[-2].stateid
         deleg = res.resarray[-2].delegation
     if (_got_deleg(deleg)):
         fail("Granted delegation to a file write-opened by another client")
+
+    close_file(sess1, fh, stateid=stateid)
+    close_file(sess2, fh2, stateid=stateid2)
 
 def testServerSelfConflict3(t, env):
     """DELEGATION test
@@ -264,13 +287,15 @@ def testServerSelfConflict3(t, env):
     sess1.client.cb_pre_hook(OP_CB_RECALL, pre_hook)
     sess1.client.cb_post_hook(OP_CB_RECALL, post_hook)
 
-    fh, deleg = __create_file_with_deleg(sess1, env.testname(t),
+    fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t),
             OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
-    print("__create_file_with_deleg: ", fh, deleg)
+    print("__create_file_with_deleg: ", fh, stateid, deleg)
     delegstateid = deleg.read.stateid
     res = open_file(sess1, env.testname(t), access = OPEN4_SHARE_ACCESS_WRITE)
     print("open_file res: ", res)
     check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
 
     # XXX: cut-n-paste from _testDeleg; make helper instead:
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
@@ -280,15 +305,25 @@ def testServerSelfConflict3(t, env):
     how = openflag4(OPEN4_NOCREATE)
     open_op = op.open(0, OPEN4_SHARE_ACCESS_WRITE,
                       OPEN4_SHARE_DENY_NONE, owner, how, claim)
-    slot = sess2.compound_async(env.home + [open_op])
+    slot = sess2.compound_async(env.home + [open_op, op.getfh()])
     completed = recall.wait(2)
     env.sleep(.1)
     res = sess1.compound([op.putfh(fh), op.delegreturn(delegstateid)])
     check(res)
     res = sess2.listen(slot)
     check(res, [NFS4_OK, NFS4ERR_DELAY])
+    if res.status == NFS4_OK:
+        fh2 = res.resarray[-1].object
+        stateid2 = res.resarray[-2].stateid
+    else:
+        fh2 = None
+        stateid2 = None
     if not completed:
         fail("delegation break not received")
+
+    close_file(sess1, fh, stateid=stateid)
+    if fh2 is not None and stateid2 is not None:
+        close_file(sess2, fh2, stateid=stateid2)
 
 def _testCbGetattr(t, env, change=0, size=0):
     cb = threading.Event()
@@ -318,8 +353,8 @@ def _testCbGetattr(t, env, change=0, size=0):
         if caps[FATTR4_OPEN_ARGUMENTS].oa_share_access_want & OPEN_ARGS_SHARE_ACCESS_WANT_DELEG_TIMESTAMPS:
             openmask |= 1<<OPEN_ARGS_SHARE_ACCESS_WANT_DELEG_TIMESTAMPS
 
-    fh, deleg = __create_file_with_deleg(sess1, env.testname(t), openmask)
-    print("__create_file_with_deleg: ", fh, deleg)
+    fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t), openmask)
+    print("__create_file_with_deleg: ", fh, stateid, deleg)
     attrs1 = do_getattrdict(sess1, fh, [FATTR4_CHANGE, FATTR4_SIZE,
                                         FATTR4_TIME_ACCESS, FATTR4_TIME_MODIFY])
 
@@ -351,6 +386,7 @@ def _testCbGetattr(t, env, change=0, size=0):
     check(res, [NFS4_OK, NFS4ERR_DELAY])
     if not completed:
         fail("CB_GETATTR not received")
+    close_file(sess1, fh, stateid=stateid)
     return attrs1, attrs2
 
 def testCbGetattrNoChange(t, env):
