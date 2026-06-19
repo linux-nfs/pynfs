@@ -911,3 +911,44 @@ def testDirDelegLinkNotify(t, env):
         fail("Expected ADD notification for link, got %d" % evt_type)
     if evt.nad_new_entry.ne_file != link_name:
         fail("Wrong entry name in ADD notification")
+
+def testDirDelegSameClientNoNotify(t, env):
+    """Verify delegation holder's own changes don't trigger notifications
+
+    Per RFC 8881bis Section 16.2.11.2, order-unaware clients should not
+    receive notifications for changes they made themselves.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG20
+    """
+    c = env.c1
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create a file from the delegation-holding session itself
+    claim = open_claim4(CLAIM_NULL, env.testname(t))
+    owner = open_owner4(0, b"owner")
+    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
+    open_op = [ op.putfh(fh), op.open(0,
+                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
+    res = sess1.compound(open_op)
+    check(res)
+    open_stateid = res.resarray[-2].stateid
+    file_fh = res.resarray[-1].object
+
+    # Wait briefly -- should NOT get any callback
+    completed = cb.wait(2)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    close_file(sess1, file_fh, stateid=open_stateid)
+
+    if cb.got_notify:
+        fail("Got CB_NOTIFY for delegation holder's own change")
+    if cb.got_recall:
+        fail("Got CB_RECALL for delegation holder's own change")
