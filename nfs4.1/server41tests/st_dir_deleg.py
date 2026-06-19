@@ -558,3 +558,57 @@ def testDirDelegChildAttrs(t, env):
     attr_dict = nfs4lib.fattr2dict(attrs)
     if FATTR4_SIZE in attr_dict and attr_dict[FATTR4_SIZE] != 0:
         fail("Expected size 0 for new file, got %d" % attr_dict[FATTR4_SIZE])
+
+def testDirDelegDirAttrs(t, env):
+    """Verify CHANGE_DIR_ATTRS notification on directory change
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG13
+    """
+    c = env.c1
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_CHANGE_DIR_ATTRS,
+                                      NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    claim = open_claim4(CLAIM_NULL, env.testname(t))
+    owner = open_owner4(0, b"owner")
+    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
+    open_op = [ op.putfh(fh), op.open(0,
+                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
+    res = sess2.compound(open_op)
+    check(res)
+    open_stateid = res.resarray[-2].stateid
+    file_fh = res.resarray[-1].object
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    # Look for a CHANGE_DIR_ATTRS event among the changes
+    found_dir_attrs = False
+    for change in cb.changes:
+        evt_type, evt = decode_notify_event(change)
+        if evt_type == NOTIFY4_CHANGE_DIR_ATTRS:
+            found_dir_attrs = True
+            attrs = evt.na_changed_entry.ne_attrs
+            if not any(attrs.attrmask):
+                fail("No directory attributes in CHANGE_DIR_ATTRS notification")
+            break
+
+    if not found_dir_attrs:
+        fail("No CHANGE_DIR_ATTRS notification found")
