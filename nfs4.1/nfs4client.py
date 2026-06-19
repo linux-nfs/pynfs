@@ -283,6 +283,12 @@ class NFS4Client(rpc.Client, rpc.Server):
         res = self.posthook(arg, env, res=NFS4_OK)
         return encode_status(res)
 
+    def op_cb_notify(self, arg, env):
+        log_cb.info("In CB_NOTIFY")
+        self.prehook(arg, env)
+        res = self.posthook(arg, env, res=NFS4_OK)
+        return encode_status(res)
+
     def op_cb_notify_lock(self, arg, env):
         log_cb.info("In CB_NOTIFY_LOCK")
         self.prehook(arg, env)
