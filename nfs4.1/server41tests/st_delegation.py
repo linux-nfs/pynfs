@@ -291,10 +291,8 @@ def testServerSelfConflict3(t, env):
 
     fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t),
             OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
-    print("__create_file_with_deleg: ", fh, stateid, deleg)
     delegstateid = deleg.read.stateid
     res = open_file(sess1, env.testname(t), access = OPEN4_SHARE_ACCESS_WRITE)
-    print("open_file res: ", res)
     check(res)
     fh = res.resarray[-1].object
     stateid = res.resarray[-2].stateid
@@ -353,7 +351,6 @@ def _testCbGetattr(t, env, change=0, size=0):
             openmask |= 1<<OPEN_ARGS_SHARE_ACCESS_WANT_DELEG_TIMESTAMPS
 
     fh, stateid, deleg = __create_file_with_deleg(sess1, env.testname(t), openmask)
-    print("__create_file_with_deleg: ", fh, stateid, deleg)
     delegtype = deleg.delegation_type
     if delegtype != OPEN_DELEGATE_WRITE_ATTRS_DELEG and delegtype != OPEN_DELEGATE_WRITE:
         fail("Didn't get a write delegation.")

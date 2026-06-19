@@ -83,7 +83,7 @@ class NFS4Client(rpc.Client, rpc.Server):
         p = packer(check_enum=checks, check_array=checks)
         c4 = COMPOUND4args(tag, version, ops)
         if SHOW_TRAFFIC:
-            log_cb.info("compound args = %r" % (c4,))
+            log_cb.debug("compound args = %r" % (c4,))
         p.pack_COMPOUND4args(c4)
         return self.send_call(pipe, 1, p.get_buffer(), credinfo)
 
@@ -93,7 +93,7 @@ class NFS4Client(rpc.Client, rpc.Server):
         pipe = kwargs.get("pipe", None)
         res = self.listen(xid, pipe=pipe)
         if SHOW_TRAFFIC:
-            log_cb.info("compound result = %r" % (res,))
+            log_cb.debug("compound result = %r" % (res,))
         if self.summary:
             self.summary.show_op('call v4.1 %s:%s' % self.server_address,
                 [ nfs_opnum4[a.argop].lower()[3:] for a in args[0] ],
@@ -112,8 +112,8 @@ class NFS4Client(rpc.Client, rpc.Server):
     def handle_0(self, data, cred):
         """NULL procedure"""
         allow_null_data = True
-        log_cb.info("*" * 20)
-        log_cb.info("Handling CB_NULL")
+        log_cb.debug("*" * 20)
+        log_cb.debug("Handling CB_NULL")
         if data and not allow_null_data:
             return rpc.GARBAGE_ARGS, None
         else:
@@ -121,16 +121,16 @@ class NFS4Client(rpc.Client, rpc.Server):
 
     def handle_1(self, data, cred):
         # STUB
-        log_cb.info("*" * 20)
-        log_cb.info("Handling CB_COMPOUND")
+        log_cb.debug("*" * 20)
+        log_cb.debug("Handling CB_COMPOUND")
         p = nfs4lib.FancyNFS4Packer()
         res = CB_COMPOUND4res(NFS4ERR_BACK_CHAN_BUSY, "STUB CB_REPLY", [])
         p.pack_CB_COMPOUND4res(res)
         return rpc.SUCCESS, p.get_buffer()
 
     def handle_1(self, data, cred):
-        log_cb.info("*" * 20)
-        log_cb.info("Handling COMPOUND")
+        log_cb.debug("*" * 20)
+        log_cb.debug("Handling COMPOUND")
         # data is an XDR packed string.  Unpack it.
         unpacker = nfs4lib.FancyNFS4Unpacker(data)
         try:
@@ -146,7 +146,7 @@ class NFS4Client(rpc.Client, rpc.Server):
             args.req_size = len(data)
             # Handle the request
             env = self.op_cb_compound(args, cred)
-            log_cb.info(repr(env.results.reply.results))
+            log_cb.debug(repr(env.results.reply.results))
             # Pack the results back into an XDR string
             p = nfs4lib.FancyNFS4Packer()
             p.pack_CB_COMPOUND4res(CB_COMPOUND4res(env.results.reply.status,
@@ -162,9 +162,9 @@ class NFS4Client(rpc.Client, rpc.Server):
                 env.cache.data = p.get_buffer()
                 env.cache.valid.set()
         except NFS4Replay as e:
-            log_cb.info("Replay...waiting for valid data")
+            log_cb.debug("Replay...waiting for valid data")
             e.cache.valid.wait()
-            log_cb.info("Replay...sending data")
+            log_cb.debug("Replay...sending data")
             data = e.cache.data
         return rpc.SUCCESS, data, getattr(env, "notify", None)
 
@@ -190,7 +190,7 @@ class NFS4Client(rpc.Client, rpc.Server):
         status = NFS4_OK
         for arg in args.argarray:
             opname = nfs_cb_opnum4.get(arg.argop, 'op_cb_illegal')
-            log_cb.info("*** %s (%d) ***" % (opname, arg.argop))
+            log_cb.debug("*** %s (%d) ***" % (opname, arg.argop))
             env.index += 1
             # Look for function self.op_<name>
             funct = getattr(self, opname.lower(), None)
@@ -220,7 +220,7 @@ class NFS4Client(rpc.Client, rpc.Server):
             status = result.status
             if status != NFS4_OK:
                 break
-        log_cb.info("Replying.  Status %s (%d)" % (nfsstat4[status], status))
+        log_cb.debug("Replying.  Status %s (%d)" % (nfsstat4[status], status))
         return env
 
     def prehook(self, arg, env):
@@ -248,7 +248,7 @@ class NFS4Client(rpc.Client, rpc.Server):
         return funct(arg, env, res)
 
     def op_cb_sequence(self, arg, env):
-        log_cb.info("In CB_SEQUENCE")
+        log_cb.debug("In CB_SEQUENCE")
         if env.index != 0:
             return encode_status(NFS4ERR_SEQUENCE_POS)
         session = self.sessions.get(arg.csa_sessionid, None)
@@ -272,31 +272,31 @@ class NFS4Client(rpc.Client, rpc.Server):
         return encode_status(NFS4_OK, res)
 
     def op_cb_getattr(self, arg, env):
-        log_cb.info("In CB_GETATTR")
+        log_cb.debug("In CB_GETATTR")
         self.prehook(arg, env)
         res = self.posthook(arg, env, res=CB_GETATTR4resok())
         return encode_status(NFS4_OK, res)
 
     def op_cb_recall(self, arg, env):
-        log_cb.info("In CB_RECALL")
+        log_cb.debug("In CB_RECALL")
         self.prehook(arg, env)
         res = self.posthook(arg, env, res=NFS4_OK)
         return encode_status(res)
 
     def op_cb_notify(self, arg, env):
-        log_cb.info("In CB_NOTIFY")
+        log_cb.debug("In CB_NOTIFY")
         self.prehook(arg, env)
         res = self.posthook(arg, env, res=NFS4_OK)
         return encode_status(res)
 
     def op_cb_notify_lock(self, arg, env):
-        log_cb.info("In CB_NOTIFY_LOCK")
+        log_cb.debug("In CB_NOTIFY_LOCK")
         self.prehook(arg, env)
         res = self.posthook(arg, env, res=NFS4_OK)
         return encode_status(res)
 
     def op_cb_layoutrecall(self, arg, env):
-        log_cb.info("In CB_LAYOUTRECALL")
+        log_cb.debug("In CB_LAYOUTRECALL")
         self.prehook(arg, env)
         res = self.posthook(arg, env, res=NFS4_OK)
         if res is not NFS4_OK:
