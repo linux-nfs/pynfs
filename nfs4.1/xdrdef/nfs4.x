@@ -3611,7 +3611,8 @@ enum notify_type4 {
         NOTIFY4_REMOVE_ENTRY = 2,
         NOTIFY4_ADD_ENTRY = 3,
         NOTIFY4_RENAME_ENTRY = 4,
-        NOTIFY4_CHANGE_COOKIE_VERIFIER = 5
+        NOTIFY4_CHANGE_COOKIE_VERIFIER = 5,
+        NOTIFY4_GFLAG_EXTEND = 6 /* proposed in rfc8881bis */
 };
 
 /* Changed entry information.  */
