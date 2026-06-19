@@ -65,14 +65,29 @@ def _getDirDeleg(t, env, notify_mask, cb):
     check(res)
     fh = res.resarray[-1].object
 
-    ops = [ op.putfh(fh), op.get_dir_delegation(False,
-                                                nfs4lib.list2bitmap(notify_mask),
+    mask_bm = nfs4lib.list2bitmap(notify_mask)
+    ops = [ op.putfh(fh), op.get_dir_delegation(False, nfs4lib.list2bitmap(notify_mask),
                                                 zerotime, zerotime,
                                                 nfs4lib.list2bitmap([]),
                                                 nfs4lib.list2bitmap([]))]
     res = sess1.compound(ops)
-    check(res)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP])
+    if (res.status == NFS4ERR_NOTSUPP):
+        t.pass_warn("Server doesn't support GET_DIR_DELEGATION")
+
+    nf = res.resarray[-1].gddr_res_non_fatal4
+    if nf.gddrnf_status == GDD4_UNAVAIL:
+        t.pass_warn("Server reported that delegation on new dir was unavailable.")
+    elif nf.gddrnf_status != GDD4_OK:
+        t.fail("Server returned unknown non-fatal status code.")
+
     deleg = res.resarray[-1].gddrnf_resok4.gddr_stateid
+    if NOTIFY4_GFLAG_EXTEND in notify_mask and \
+       nf.gddrnf_resok4.gddr_notification != mask_bm:
+        ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+        res = sess1.compound(ops)
+        t.pass_warn("Server didn't offer the necessary directory notifications for this test")
+
     return (sess1, fh, deleg)
 
 def testDirDelegSimple(t, env):
