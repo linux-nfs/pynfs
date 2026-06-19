@@ -477,7 +477,7 @@ def create_obj(sess, path, kind=NF4DIR, attrs={FATTR4_MODE:0o755}):
     # Ensure using createtype4
     if not hasattr(kind, "type"):
         kind = createtype4(kind)
-    ops = use_obj(path[:-1]) + [op.create(kind, path[-1], attrs)]
+    ops = use_obj(path[:-1]) + [op.create(kind, path[-1], attrs), op.getfh()]
     return sess.compound(ops)
 
 def open_create_file(sess, owner, path=None, attrs={FATTR4_MODE: 0o644},
