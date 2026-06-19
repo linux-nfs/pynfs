@@ -1050,3 +1050,68 @@ def testDirDelegCrossRenameOver(t, env):
 
     if not got_add:
         fail("Missing ADD notification for cross-dir rename-over")
+
+def testDirDelegRenameOver(t, env):
+    """Verify within-directory rename-over populates nad_old_entry
+
+    Per RFC 8881bis Section 27.4.6, when a within-directory rename
+    overwrites an existing entry, the overwritten entry's info is
+    reported in nrn_new_entry.nad_old_entry.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG22
+    """
+    c = env.c1
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_RENAME_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create two files in the delegated directory from sess1
+    src_name = env.testname(t)
+    victim_name = b"%s_victim" % env.testname(t)
+    owner = open_owner4(0, b"owner")
+    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
+
+    for name in [src_name, victim_name]:
+        claim = open_claim4(CLAIM_NULL, name)
+        open_op = [ op.putfh(fh), op.open(0,
+                                          OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                                          OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
+        res = sess1.compound(open_op)
+        check(res)
+        open_stateid = res.resarray[-2].stateid
+        file_fh = res.resarray[-1].object
+        close_file(sess1, file_fh, stateid=open_stateid)
+
+    # Rename src over victim from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    rename_op = [ op.putfh(fh), op.savefh(),
+                  op.putfh(fh),
+                  op.rename(src_name, victim_name) ]
+    res = sess2.compound(rename_op)
+    check(res)
+
+    completed = cb.wait(2)
+    if completed:
+        cb.clear()
+        cb.wait(1)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt_type, evt = decode_notify_event(cb.changes[0])
+    if evt_type != NOTIFY4_RENAME_ENTRY:
+        fail("Expected RENAME notification, got %d" % evt_type)
+    if evt.nrn_old_entry.nrm_old_entry.ne_file != src_name:
+        fail("Wrong old entry name in RENAME notification")
+    if evt.nrn_new_entry.nad_new_entry.ne_file != victim_name:
+        fail("Wrong new entry name in RENAME notification")
+    if len(evt.nrn_new_entry.nad_old_entry) != 1:
+        fail("Expected nad_old_entry to contain the overwritten entry")
+    if evt.nrn_new_entry.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+        fail("Wrong overwritten entry name in nad_old_entry")
