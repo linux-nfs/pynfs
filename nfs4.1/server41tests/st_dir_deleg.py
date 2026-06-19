@@ -219,3 +219,26 @@ def testDirDelegRenameRecall(t, env):
     check(res)
 
     close_file(sess1, file_fh, stateid=open_stateid)
+
+def testDirDelegMkdirRecall(t, env):
+    """Verify mkdir triggers dir delegation recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG5
+    """
+    c = env.c1
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # Create a subdirectory from sess2 -- should trigger recall
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    create_op = [ op.putfh(fh),
+                  op.create(createtype4(NF4DIR), env.testname(t),
+                            {FATTR4_MODE: 0o755}) ]
+    slot = sess2.compound_async(create_op)
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
