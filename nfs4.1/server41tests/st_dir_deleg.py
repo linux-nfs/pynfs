@@ -44,7 +44,7 @@ def _getDirDeleg(t, env, notify_mask, cb):
     def notify_pre_hook(arg, env):
         cb.stateid = arg.cna_stateid
         cb.fh = arg.cna_fh
-        cb.changes = arg.cna_changes
+        cb.changes.extend(arg.cna_changes)
         cb.got_notify = True
         env.notify = cb.set # This is called after compound sent to queue
     def notify_post_hook(arg, env, res):
@@ -52,6 +52,7 @@ def _getDirDeleg(t, env, notify_mask, cb):
 
     cb.got_recall = False
     cb.got_notify = False
+    cb.changes = []
 
     c = env.c1
     sess1 = c.new_client_session(b"%s_1" % env.testname(t))
@@ -952,3 +953,100 @@ def testDirDelegSameClientNoNotify(t, env):
         fail("Got CB_NOTIFY for delegation holder's own change")
     if cb.got_recall:
         fail("Got CB_RECALL for delegation holder's own change")
+
+def testDirDelegCrossRenameOver(t, env):
+    """Verify cross-directory rename-over reports overwritten entry in nad_old_entry
+
+    Per RFC 8881 Section 18.26.4, when a cross-directory rename
+    overwrites an existing file in the target directory, a
+    NOTIFY4_ADD_ENTRY is generated.  When the removal is done
+    atomically with the rename, a separate NOTIFY4_REMOVE_ENTRY
+    notification will not be generated.  Instead, the deletion of the
+    file will be reported as part of the NOTIFY4_ADD_ENTRY notification
+    via nad_old_entry.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG21
+    """
+    c = env.c1
+    cb = threading.Event()
+
+    # Get a dir delegation on the target directory
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    topdir = c.homedir + [t.code.encode('utf8')]
+
+    # Create a file in the delegated directory (will be renamed over)
+    victim_name = b"%s_victim" % env.testname(t)
+    claim = open_claim4(CLAIM_NULL, victim_name)
+    owner = open_owner4(0, b"owner")
+    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
+    open_op = [ op.putfh(fh), op.open(0,
+                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
+    res = sess1.compound(open_op)
+    check(res)
+    open_stateid = res.resarray[-2].stateid
+    file_fh = res.resarray[-1].object
+    close_file(sess1, file_fh, stateid=open_stateid)
+
+    # Create a source directory and a file in it
+    srcdir = c.homedir + [b"%s_src" % t.code.encode('utf8')]
+    res = create_obj(sess1, srcdir)
+    check(res)
+    src_fh = res.resarray[-1].object
+
+    src_name = env.testname(t)
+    claim2 = open_claim4(CLAIM_NULL, src_name)
+    owner2 = open_owner4(0, b"owner2")
+    how2 = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
+    open_op = [ op.putfh(src_fh), op.open(0,
+                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                                      OPEN4_SHARE_DENY_NONE, owner2, how2, claim2), op.getfh() ]
+    res = sess1.compound(open_op)
+    check(res)
+    open_stateid2 = res.resarray[-2].stateid
+    file_fh2 = res.resarray[-1].object
+    close_file(sess1, file_fh2, stateid=open_stateid2)
+
+    # Clear notification state from creates above
+    cb.clear()
+    cb.got_notify = False
+
+    # Rename the source file over the victim in the delegated dir from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    oldpath = srcdir + [src_name]
+    newpath = topdir + [victim_name]
+    res = rename_obj(sess2, oldpath, newpath)
+    check(res)
+
+    completed = cb.wait(2)
+    if completed:
+        cb.clear()
+        cb.wait(1)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    # Look for ADD notification with nad_old_entry for the overwritten file
+    got_add = False
+    for change in cb.changes:
+        evt_type, evt = decode_notify_event(change)
+        if evt_type == NOTIFY4_ADD_ENTRY:
+            got_add = True
+            if evt.nad_new_entry.ne_file != victim_name:
+                fail("Wrong entry name in ADD notification")
+            if len(evt.nad_old_entry) != 1:
+                fail("Expected nad_old_entry to contain the overwritten entry")
+            if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+                fail("Wrong overwritten entry name in nad_old_entry")
+
+    if not got_add:
+        fail("Missing ADD notification for cross-dir rename-over")
