@@ -1117,3 +1117,51 @@ def testFlexLayoutReturn100(t, env):
     # Close file
     res = close_file(sess, fh, stateid=open_stateid)
     check(res)
+
+def testFlexFlags(t, env):
+    """Verify ffl_flags contains only valid RFC 8435 bits.
+
+    FLAGS: flex
+    CODE: FFFL1
+    """
+    sess = env.c1.new_pnfs_client_session(env.testname(t))
+
+    # Create file
+    res = create_file(sess, env.testname(t))
+    check(res)
+    fh = res.resarray[-1].object
+    open_stateid = res.resarray[-2].stateid
+
+    # LAYOUTGET
+    ops = [op.putfh(fh),
+           op.layoutget(False, LAYOUT4_FLEX_FILES, LAYOUTIOMODE4_RW,
+                        0, 8192, 8192, open_stateid, 0xffff)]
+    res = sess.compound(ops)
+    check(res)
+    lo_stateid = res.resarray[-1].logr_stateid
+
+    # Unpack ff_layout4 and check ffl_flags
+    layout = res.resarray[-1].logr_layout[-1]
+    p = FlexUnpacker(layout.loc_body)
+    opaque = p.unpack_ff_layout4()
+
+    valid_flags = (FF_FLAGS_NO_LAYOUTCOMMIT |
+                   FF_FLAGS_NO_IO_THRU_MDS |
+                   FF_FLAGS_NO_READ_IO)
+    if opaque.ffl_flags & ~valid_flags:
+        t.fail("ffl_flags 0x%x has undefined bits set (valid: 0x%x)"
+               % (opaque.ffl_flags, valid_flags))
+
+    # LAYOUTRETURN
+    ops = [op.putfh(fh),
+           op.layoutreturn(False, LAYOUT4_FLEX_FILES, LAYOUTIOMODE4_ANY,
+                           layoutreturn4(LAYOUTRETURN4_FILE,
+                                         layoutreturn_file4(0, NFS4_MAXFILELEN,
+                                                            lo_stateid,
+                                                            empty_p.get_buffer())))]
+    res = sess.compound(ops)
+    check(res)
+
+    # Close file
+    res = close_file(sess, fh, stateid=open_stateid)
+    check(res)
