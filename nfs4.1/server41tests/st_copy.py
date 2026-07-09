@@ -31,6 +31,21 @@ def _poll_offload_status(sess, dst_fh, copy_stateid, timeout=120):
         time.sleep(1)
     fail("OFFLOAD_STATUS did not complete within %d seconds" % timeout)
 
+def _copied_count(sess, dst_fh, cr):
+    """Return the number of bytes a COPY moved.
+
+    RFC 7862 lets the server perform a synchronous COPY asynchronously;
+    cr_requirements.cr_synchronous reports which happened.  For an
+    asynchronous copy, poll OFFLOAD_STATUS until it completes.
+    """
+    if cr.cr_resok4.cr_requirements.cr_synchronous:
+        return cr.cr_response.wr_count
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+    status = _poll_offload_status(sess, dst_fh, copy_stateid)
+    if status.osr_complete[0] != NFS4_OK:
+        fail("Async copy completed with error: %d" % status.osr_complete[0])
+    return status.osr_count
+
 def _create_and_open(sess, name):
     res = create_file(sess, name)
     check(res)
@@ -96,6 +111,31 @@ def testSyncCopy(t, env):
                  (len(data), status.osr_count))
 
     _verify_data(sess, dst_fh, dst_stateid, data)
+
+def testCopyWithOffset(t, env):
+    """copy with non-zero source and destination offsets
+
+    FLAGS: copy
+    CODE: COPY2
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"\x00" * 1024 + b"B" * 4096 + b"\x00" * 1024
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   src_offset=1024, dst_offset=512, count=4096, synchronous=1)
+    check(res)
+    count = _copied_count(sess, dst_fh, res.resarray[-1])
+    if count != 4096:
+        fail("Expected to copy 4096 bytes, got %d" % count)
+
+    res = read_file(sess, dst_fh, 512, 4096, dst_stateid)
+    check(res)
+    if res.data != b"B" * 4096:
+        fail("Destination data at offset 512 does not match expected content")
 
 def testZeroLengthCopy(t, env):
     """test that zero-length copy copies to EOF
