@@ -122,6 +122,39 @@ def testCopyWithOffset(t, env):
     if res.data != b"B" * 4096:
         fail("Destination data at offset 512 does not match expected content")
 
+def testAsyncCopy(t, env):
+    """request async copy, poll OFFLOAD_STATUS, verify data
+
+    FLAGS: copy
+    CODE: COPY3
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"C" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   count=len(data), synchronous=0)
+    check(res)
+    cr = res.resarray[-1]
+
+    if not cr.cr_resok4.cr_requirements.cr_synchronous:
+        copy_stateid = cr.cr_response.wr_callback_id[0]
+        status = _poll_offload_status(sess, dst_fh, copy_stateid)
+        if status.osr_complete[0] != NFS4_OK:
+            fail("Async copy completed with error: %d" % status.osr_complete[0])
+        if status.osr_count != len(data):
+            fail("Expected %d bytes copied, got %d" %
+                 (len(data), status.osr_count))
+    else:
+        if cr.cr_response.wr_count != len(data):
+            fail("Sync copy returned %d bytes, expected %d" %
+                 (cr.cr_response.wr_count, len(data)))
+
+    _verify_data(sess, dst_fh, dst_stateid, data)
+
 def testZeroLengthCopy(t, env):
     """test that zero-length copy copies to EOF
 
