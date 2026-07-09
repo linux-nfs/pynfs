@@ -3346,7 +3346,7 @@ union nfs_argop4 switch (nfs_opnum4 argop) {
  /* Operations new to NFSv4.2 */
  case OP_ALLOCATE:      ALLOCATE4args opallocate;
  case OP_COPY:          COPY4args opcopy;
- case OP_COPY_NOTIFY:   COPY_NOTIFY4args opoffload_notify;
+ case OP_COPY_NOTIFY:   COPY_NOTIFY4args opcopy_notify;
  case OP_DEALLOCATE:    DEALLOCATE4args opdeallocate;
  case OP_IO_ADVISE:     IO_ADVISE4args opio_advise;
  case OP_LAYOUTERROR: LAYOUTERROR4args  oplayouterror;
