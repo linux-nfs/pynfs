@@ -225,3 +225,31 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
     if recheck.osr_complete[0] != NFS4_OK:
         fail("OFFLOAD_STATUS completion changed to error: %d" %
              recheck.osr_complete[0])
+
+def testOffloadCancel(t, env):
+    """start an async copy and cancel it with OFFLOAD_CANCEL
+
+    FLAGS: copy
+    CODE: COPY7
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"E" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   count=len(data), synchronous=0)
+    check(res)
+    cr = res.resarray[-1]
+
+    if cr.cr_resok4.cr_requirements.cr_synchronous:
+        return
+
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+
+    ops = [op.putfh(dst_fh), op.offload_cancel(copy_stateid)]
+    res = sess.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_COMPLETE_ALREADY],
+          msg="OFFLOAD_CANCEL")
