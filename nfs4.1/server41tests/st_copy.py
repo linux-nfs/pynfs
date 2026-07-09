@@ -436,3 +436,83 @@ def testCopyNotifyNoFh(t, env):
         t.fail_support("Server does not support COPY_NOTIFY "
                        "(inter-server copy source)")
     check(res, NFS4ERR_NOFILEHANDLE, msg="COPY_NOTIFY with no filehandle")
+
+def _inter_copy_ops(src_fh, src_stateid, dst_fh, dst_stateid, source_server,
+                    src_offset=0, dst_offset=0, count=0,
+                    consecutive=0, synchronous=1):
+    """COMPOUND for an inter-server COPY, sent to the destination server.
+
+    SAVED_FH is the source file's filehandle as known to the source server;
+    the destination server treats it as opaque and forwards it to the source
+    named by source_server (a non-empty ca_source_server list is what marks
+    the copy as inter-server).
+    """
+    return [op.putfh(src_fh), op.savefh(), op.putfh(dst_fh),
+            op.copy(src_stateid, dst_stateid, src_offset, dst_offset,
+                    count, consecutive, synchronous, source_server)]
+
+def testInterServerCopy(t, env):
+    """server-to-server (inter-server) COPY across two servers
+
+    Requires a second server: pass --server2 SERVER:/PATH.  The source file
+    is created on the second server (env.c2, the copy source) and the
+    destination file on the primary server (env.c1, the copy destination).
+    The client issues COPY_NOTIFY to the source to authorize the destination,
+    then COPY to the destination naming the source via ca_source_server.
+
+    FLAGS: copy
+    CODE: INTERCOPY1
+    VERS: 2-
+    """
+    if env.c2 is None:
+        t.fail_support("No second server configured "
+                       "(pass --server2 SERVER:/PATH to enable)")
+
+    # Source file on the second server (the copy source).
+    src_sess = env.c2.new_client_session(env.testname(t) + b"_src")
+    src_fh, src_stateid = _create_and_open(src_sess, env.testname(t))
+    data = b"inter-server copy payload " * 4096
+    _write_data(src_sess, src_fh, src_stateid, data)
+
+    # Ask the source to authorize the primary server as the copy destination.
+    dest_netloc = _server_netloc(env)   # names the primary server (env.c1)
+    res = src_sess.compound([op.putfh(src_fh),
+                             op.copy_notify(src_stateid, dest_netloc)])
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP], msg="COPY_NOTIFY on source server")
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Source server does not support COPY_NOTIFY")
+    cnr = res.resarray[-1]
+    copy_src_stateid = cnr.cnr_stateid
+    source_server = cnr.cnr_source_server
+    if not source_server:
+        fail("COPY_NOTIFY returned an empty cnr_source_server list")
+
+    # Destination file on the primary server (the copy destination).
+    dst_sess = env.c1.new_client_session(env.testname(t) + b"_dst")
+    dst_fh, dst_stateid = _create_and_open(dst_sess, env.testname(t))
+
+    # COPY to the destination, naming the source via ca_source_server.
+    # Inter-server copy is asynchronous on the Linux server (a synchronous
+    # request returns NFS4ERR_NOTSUPP), so ask for async and poll below.
+    ops = _inter_copy_ops(src_fh, copy_src_stateid, dst_fh, dst_stateid,
+                          source_server, count=len(data), synchronous=0)
+    res = dst_sess.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP], msg="inter-server COPY")
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Destination server does not support inter-server COPY")
+    cr = res.resarray[-1]
+
+    if cr.cr_resok4.cr_requirements.cr_synchronous:
+        if cr.cr_response.wr_count != len(data):
+            fail("Inter-server copy expected %d bytes, got %d" %
+                 (len(data), cr.cr_response.wr_count))
+    else:
+        copy_stateid = cr.cr_response.wr_callback_id[0]
+        status = _poll_offload_status(dst_sess, dst_fh, copy_stateid)
+        if status.osr_complete[0] != NFS4_OK:
+            fail("Async inter-server copy error: %d" % status.osr_complete[0])
+        if status.osr_count != len(data):
+            fail("Expected %d bytes copied, got %d" %
+                 (len(data), status.osr_count))
+
+    _verify_data(dst_sess, dst_fh, dst_stateid, data)
