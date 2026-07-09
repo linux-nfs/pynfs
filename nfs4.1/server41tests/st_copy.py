@@ -178,3 +178,50 @@ def testZeroLengthCopy(t, env):
     l = res.resarray[-1].cr_response.wr_count
     if l != len(data):
         fail("Copy to end of %d-byte file copied %d bytes" % (len(data), l))
+
+def testAsyncCopyOffloadStatusAfterComplete(t, env):
+    """verify OFFLOAD_STATUS works after async copy completes
+
+    The server should keep copy state around for a TTL window after
+    completion so clients can query final status.  This catches the
+    inverted TTL check bug where the reaper destroys the state on
+    the first tick instead of the last.
+
+    FLAGS: copy
+    CODE: COPY6
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"D" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   count=len(data), synchronous=0)
+    check(res)
+    cr = res.resarray[-1]
+
+    if cr.cr_resok4.cr_requirements.cr_synchronous:
+        if cr.cr_response.wr_count != len(data):
+            fail("Sync copy returned %d bytes, expected %d" %
+                 (cr.cr_response.wr_count, len(data)))
+        return
+
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+    status = _poll_offload_status(sess, dst_fh, copy_stateid)
+    if status.osr_complete[0] != NFS4_OK:
+        fail("Async copy completed with error: %d" % status.osr_complete[0])
+
+    # Copy is done. Wait a bit then re-query -- state should still be valid.
+    time.sleep(5)
+
+    ops = [op.putfh(dst_fh), op.offload_status(copy_stateid)]
+    res = sess.compound(ops)
+    check(res, msg="OFFLOAD_STATUS after completion should still succeed")
+    recheck = res.resarray[-1]
+    if not recheck.osr_complete:
+        fail("OFFLOAD_STATUS lost completion status")
+    if recheck.osr_complete[0] != NFS4_OK:
+        fail("OFFLOAD_STATUS completion changed to error: %d" %
+             recheck.osr_complete[0])
