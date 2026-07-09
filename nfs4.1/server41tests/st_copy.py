@@ -300,3 +300,26 @@ def testOffloadStatusNoState(t, env):
     ops = [op.putfh(src_fh), op.offload_status(_bad_stateid())]
     res = sess.compound(ops)
     check(res, NFS4ERR_BAD_STATEID, msg="OFFLOAD_STATUS with bad stateid")
+
+def testCopyToSameFile(t, env):
+    """copy within the same file to non-overlapping region
+
+    FLAGS: copy
+    CODE: COPY11
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    fh, stateid = _create_and_open(sess, env.testname(t))
+    data = b"F" * 4096
+    write_file(sess, fh, data, 0, stateid)
+
+    res = _do_copy(sess, fh, stateid, fh, stateid,
+                   src_offset=0, dst_offset=8192, count=4096, synchronous=1)
+    check(res)
+    cr = res.resarray[-1]
+    if cr.cr_response.wr_count != 4096:
+        fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
+
+    res = read_file(sess, fh, 8192, 4096, stateid)
+    check(res)
+    if res.data != data:
+        fail("Same-file copy: data at offset 8192 does not match source")
