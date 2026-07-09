@@ -153,6 +153,13 @@ def scan_options(p):
                  help="Use FH for certain specialized tests")
     p.add_option_group(g)
 
+    g = OptionGroup(p, "Inter-server copy options",
+                    "A second server enables NFSv4.2 inter-server "
+                    "(server-to-server) COPY tests.")
+    g.add_option("--server2", default=None, metavar="SERVER:/PATH",
+                 help="Second server and export for inter-server copy tests")
+    p.add_option_group(g)
+
     g = OptionGroup(p, "Server workaround options",
                     "Certain servers handle certain things in unexpected ways."
                     " These options allow you to alter test behavior so that "
@@ -258,6 +265,13 @@ def main():
         p.error("%s not a valid server name" % url)
 
     opt.server, opt.port = server_list[0]
+
+    # Optional second server for inter-server copy tests
+    if opt.server2 is not None:
+        server2_list, opt.server2_path = nfs4lib.parse_nfs_url(opt.server2)
+        if not server2_list:
+            p.error("%s not a valid server name" % opt.server2)
+        opt.server2_host, opt.server2_port = server2_list[0]
 
     if not args:
         p.error("No tests given")

@@ -119,23 +119,23 @@ class Environment(testmod.Environment):
         self._lock = Lock()
         self.opts = opts
         self.c1 = nfs4client.NFS4Client(opts.server, opts.port, opts.minorversion, secure=opts.secure)
-        s1 = rpc.security.instance(opts.flavor)
-        if opts.flavor == rpc.AUTH_NONE:
-            self.cred1 = s1.init_cred()
-        elif opts.flavor == rpc.AUTH_SYS:
-            self.cred1 = s1.init_cred(uid=opts.uid, gid=opts.gid, name=opts.machinename)
-        elif opts.flavor == rpc.RPCSEC_GSS:
-            call = self.c1.make_call_function(self.c1.c1, 0,
-                                              self.c1.default_prog,
-                                              self.c1.default_vers)
-            krb5_cred = AuthGss().init_cred(call, target="nfs@%s" % opts.server)
-            krb5_cred.service = opts.service
-            self.cred1 = krb5_cred
-        self.c1.set_cred(self.cred1)
+        self.cred1 = self._make_cred(self.c1, opts.server)
         self.cred2 = AuthSys().init_cred(uid=1111, gid=37, name=b"shampoo")
 
         opts.home = opts.path + [b'tmp']
         self.c1.homedir = opts.home
+
+        # Optional second server, used only by inter-server (server-to-server)
+        # COPY tests.  Enabled by passing --server2 SERVER:/PATH on the
+        # command line; None otherwise so single-server runs are unaffected.
+        self.c2 = None
+        if getattr(opts, "server2", None):
+            self.c2 = nfs4client.NFS4Client(opts.server2_host, opts.server2_port,
+                                            opts.minorversion, secure=opts.secure)
+            opts.server2_home = opts.server2_path + [b'tmp']
+            self.c2.homedir = opts.server2_home
+            self._make_cred(self.c2, opts.server2_host)
+
         # Put this after client creation, to ensure _last_verf bigger than
         # any natural client verifiers
         self.timestamp = int(time.time())
@@ -146,38 +146,72 @@ class Environment(testmod.Environment):
         self.stateid1 = stateid4(0xffffffff, b'\xff'*12)
 
         log.info("Created client to %s, %i" % (opts.server, opts.port))
+        if self.c2 is not None:
+            log.info("Created second client to %s, %i" %
+                     (opts.server2_host, opts.server2_port))
+
+    def _make_cred(self, client, server_host):
+        """Build and install an RPC credential on client for server_host."""
+        s = rpc.security.instance(self.opts.flavor)
+        if self.opts.flavor == rpc.AUTH_NONE:
+            cred = s.init_cred()
+        elif self.opts.flavor == rpc.AUTH_SYS:
+            cred = s.init_cred(uid=self.opts.uid, gid=self.opts.gid,
+                               name=self.opts.machinename)
+        elif self.opts.flavor == rpc.RPCSEC_GSS:
+            call = client.make_call_function(client.c1, 0,
+                                             client.default_prog,
+                                             client.default_vers)
+            cred = AuthGss().init_cred(call, target="nfs@%s" % server_host)
+            cred.service = self.opts.service
+        client.set_cred(cred)
+        return cred
+
+    def _all_clients(self):
+        """All configured clients (c1, and c2 if a second server was given)."""
+        return [c for c in (self.c1, self.c2) if c is not None]
 
     def init(self):
         """Run once before any test is run"""
         if self.opts.noinit:
             return
-        sess = self.c1.new_client_session(b"Environment.init_%i" %
-                                                    self.timestamp)
-        if self.opts.maketree:
-            self._maketree(sess)
-        # Make sure opts.home exists
-        res = sess.compound(use_obj(self.opts.home))
-        check(res, msg="Could not LOOKUP /%s," % b'/'.join(self.opts.home))
-        # Make sure it is empty
-        clean_dir(sess, self.opts.home)
-        sess.c.null()
+        self._init_server(self.c1, self.opts.path, self.opts.home)
+        if self.c2 is not None:
+            self._init_server(self.c2, self.opts.server2_path,
+                              self.opts.server2_home)
         self.clean_sessions()
         self.clean_clients()
 
-    def _maketree(self, sess):
+    def _init_server(self, c, path, home):
+        """Prepare (and optionally build) the test tree on a single server."""
+        sess = c.new_client_session(b"Environment.init_%i" % self.timestamp)
+        if self.opts.maketree:
+            self._maketree(sess, path, home)
+        # Make sure home exists
+        res = sess.compound(use_obj(home))
+        check(res, msg="Could not LOOKUP /%s," % b'/'.join(home))
+        # Make sure it is empty
+        clean_dir(sess, home)
+        sess.c.null()
+
+    def _maketree(self, sess, path=None, home=None):
         """Make test tree"""
+        if path is None:
+            path = self.opts.path
+        if home is None:
+            home = self.opts.home
         # ensure /tmp (and path leading up) exists
-        path = []
-        for comp in self.opts.home:
-            path.append(comp)
-            res = sess.compound(use_obj(path))
+        p = []
+        for comp in home:
+            p.append(comp)
+            res = sess.compound(use_obj(p))
             check(res, [NFS4_OK, NFS4ERR_NOENT],
-                      "LOOKUP /%s," % b'/'.join(path))
+                      "LOOKUP /%s," % b'/'.join(p))
             if res.status == NFS4ERR_NOENT:
-                res = create_obj(sess, path, NF4DIR)
-                check(res, msg="Trying to create /%s," % b'/'.join(path))
+                res = create_obj(sess, p, NF4DIR)
+                check(res, msg="Trying to create /%s," % b'/'.join(p))
         # ensure /tree exists and is empty
-        tree = self.opts.path + [b'tree']
+        tree = path + [b'tree']
         res = sess.compound(use_obj(tree))
         check(res, [NFS4_OK, NFS4ERR_NOENT])
         if res.status == NFS4ERR_NOENT:
@@ -210,16 +244,21 @@ class Environment(testmod.Environment):
         """Run once after all tests are run"""
         if self.opts.nocleanup:
             return
-        sess = self.c1.new_client_session(b"Environment.init_%i" % self.timestamp)
-        clean_dir(sess, self.opts.home)
-        sess.c.null()
+        homes = [(self.c1, self.opts.home)]
+        if self.c2 is not None:
+            homes.append((self.c2, self.opts.server2_home))
+        for c, home in homes:
+            sess = c.new_client_session(b"Environment.init_%i" % self.timestamp)
+            clean_dir(sess, home)
+            sess.c.null()
         self.clean_sessions()
         self.clean_clients()
 
     def startUp(self):
         """Run before each test"""
         log.debug("Sending pretest NULL")
-        self.c1.null()
+        for c in self._all_clients():
+            c.null()
         log.debug("Got pretest NULL response")
 
     def sleep(self, sec, msg=''):
@@ -260,16 +299,18 @@ class Environment(testmod.Environment):
         return b"%s_%i" % (os.fsencode(t.code), self.timestamp)
 
     def clean_sessions(self):
-        """Destroy client name env.c1"""
-        for sessionid in list(self.c1.sessions):
-            self.c1.compound([op.destroy_session(sessionid)])
-            del(self.c1.sessions[sessionid])
+        """Destroy all sessions on all configured clients"""
+        for c in self._all_clients():
+            for sessionid in list(c.sessions):
+                c.compound([op.destroy_session(sessionid)])
+                del(c.sessions[sessionid])
 
     def clean_clients(self):
-        """Destroy client name env.c1"""
-        for clientid in list(self.c1.clients):
-            self.c1.compound([op.destroy_clientid(clientid)])
-            del(self.c1.clients[clientid])
+        """Destroy all client ids on all configured clients"""
+        for c in self._all_clients():
+            for clientid in list(c.clients):
+                c.compound([op.destroy_clientid(clientid)])
+                del(c.clients[clientid])
 
 #########################################
 debug_fail = False
