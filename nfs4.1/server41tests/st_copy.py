@@ -38,6 +38,11 @@ def _create_and_open(sess, name):
     stateid = res.resarray[-2].stateid
     return fh, stateid
 
+def _bad_stateid():
+    # A fabricated, non-special stateid (not the all-zero anonymous or
+    # all-one READ-bypass special stateids) the server cannot recognize.
+    return stateid4(1, b'\xde\xad\xbe\xef' * 3)
+
 def _write_data(sess, fh, stateid, data, offset=0):
     """Write data in chunks bounded by the session's max request size."""
     chunk = sess.fore_channel.maxrequestsize - 1024
@@ -253,3 +258,17 @@ def testOffloadCancel(t, env):
     res = sess.compound(ops)
     check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_COMPLETE_ALREADY],
           msg="OFFLOAD_CANCEL")
+
+def testCopyBadSourceStateid(t, env):
+    """COPY with an invalid source stateid should fail
+
+    FLAGS: copy
+    CODE: COPY8
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, _src_stateid = _create_and_open(sess, env.testname(t))
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, _bad_stateid(), dst_fh, dst_stateid,
+                   count=1024, synchronous=1)
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad source stateid")
