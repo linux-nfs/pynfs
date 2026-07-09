@@ -97,6 +97,31 @@ def testSyncCopy(t, env):
 
     _verify_data(sess, dst_fh, dst_stateid, data)
 
+def testCopyWithOffset(t, env):
+    """copy with non-zero source and destination offsets
+
+    FLAGS: copy
+    CODE: COPY2
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"\x00" * 1024 + b"B" * 4096 + b"\x00" * 1024
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   src_offset=1024, dst_offset=512, count=4096, synchronous=1)
+    check(res)
+    cr = res.resarray[-1]
+    if cr.cr_response.wr_count != 4096:
+        fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
+
+    res = read_file(sess, dst_fh, 512, 4096, dst_stateid)
+    check(res)
+    if res.data != b"B" * 4096:
+        fail("Destination data at offset 512 does not match expected content")
+
 def testZeroLengthCopy(t, env):
     """test that zero-length copy copies to EOF
 
