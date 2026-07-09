@@ -1,3 +1,4 @@
+import socket
 import time
 
 from .st_create_session import create_session
@@ -7,7 +8,7 @@ from .environment import check, fail, create_file, open_file, close_file
 from .environment import open_create_file_op, use_obj, write_file, read_file
 from xdrdef.nfs4_type import open_owner4, openflag4, createhow4, open_claim4
 from xdrdef.nfs4_type import creatverfattr, fattr4, stateid4, locker4, lock_owner4
-from xdrdef.nfs4_type import open_to_lock_owner4
+from xdrdef.nfs4_type import open_to_lock_owner4, netloc4, netaddr4
 import nfs_ops
 op = nfs_ops.NFS4ops()
 
@@ -42,6 +43,23 @@ def _bad_stateid():
     # A fabricated, non-special stateid (not the all-zero anonymous or
     # all-one READ-bypass special stateids) the server cannot recognize.
     return stateid4(1, b'\xde\xad\xbe\xef' * 3)
+
+def _server_netloc(env):
+    """netloc4 (NL4_NETADDR) naming the server under test.
+
+    The Linux server only accepts the NL4_NETADDR form of netloc4 and
+    rejects NL4_NAME / NL4_URL at decode time with NFS4ERR_BADXDR, so build
+    a universal address (RFC 1833: h.h.h.h.p1.p2) from the server address
+    and port.  For single-server COPY_NOTIFY tests this names the server
+    itself; we only need a netloc4 the source server will accept and record.
+    """
+    host, port = env.opts.server, env.opts.port
+    family, _, _, _, sockaddr = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM)[0]
+    ip = sockaddr[0]
+    uaddr = "%s.%d.%d" % (ip, (port >> 8) & 0xff, port & 0xff)
+    netid = b'tcp6' if family == socket.AF_INET6 else b'tcp'
+    return netloc4(NL4_NETADDR, nl_addr=netaddr4(netid, uaddr.encode('ascii')))
 
 def _write_data(sess, fh, stateid, data, offset=0):
     """Write data in chunks bounded by the session's max request size."""
@@ -323,3 +341,98 @@ def testCopyToSameFile(t, env):
     check(res)
     if res.data != data:
         fail("Same-file copy: data at offset 8192 does not match source")
+
+def testCopyNotify(t, env):
+    """COPY_NOTIFY authorizes a destination server to copy from the source
+
+    A client wanting an inter-server copy first sends COPY_NOTIFY to the
+    source server (CURRENT_FH = source file) naming the destination server.
+    The source returns a stateid and a list of netlocs the destination
+    should use to reach it; the client then hands these to the destination
+    server's COPY.  This exercises the source-server half against a single
+    server.
+
+    FLAGS: copy
+    CODE: CPNOTIFY1
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    _write_data(sess, src_fh, src_stateid, b"copy notify test data")
+
+    ops = [op.putfh(src_fh),
+           op.copy_notify(src_stateid, _server_netloc(env))]
+    res = sess.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP], msg="COPY_NOTIFY")
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+
+    cnr = res.resarray[-1]
+    # The client needs a source stateid to give to the destination's COPY.
+    if cnr.cnr_stateid is None:
+        fail("COPY_NOTIFY did not return a source stateid")
+    # And at least one netloc telling the destination how to reach the source.
+    if not cnr.cnr_source_server:
+        fail("COPY_NOTIFY returned an empty cnr_source_server list")
+
+def testCopyNotifyBadStateid(t, env):
+    """COPY_NOTIFY with an invalid source stateid should fail
+
+    FLAGS: copy
+    CODE: CPNOTIFY2
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, _src_stateid = _create_and_open(sess, env.testname(t))
+
+    ops = [op.putfh(src_fh),
+           op.copy_notify(_bad_stateid(), _server_netloc(env))]
+    res = sess.compound(ops)
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY_NOTIFY with bad source stateid")
+
+def testCopyNotifyUnsupportedNetloc(t, env):
+    """COPY_NOTIFY with a name or URL netloc must not return NFS4ERR_BADXDR
+
+    NL4_NAME and NL4_URL are well-formed XDR, so a server that does not
+    support them must reject the operation with NFS4ERR_NOTSUPP, not
+    NFS4ERR_BADXDR (which is reserved for XDR that cannot be decoded).  A
+    server that does support them may return NFS4_OK.
+
+    FLAGS: copy
+    CODE: CPNOTIFY4
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+
+    for name, nl in [("NL4_NAME", netloc4(NL4_NAME, nl_name=b"nfs.example.org")),
+                     ("NL4_URL", netloc4(NL4_URL,
+                                         nl_url=b"nfs://nfs.example.org/"))]:
+        res = sess.compound([op.putfh(src_fh),
+                             op.copy_notify(src_stateid, nl)])
+        if res.status == NFS4ERR_BADXDR:
+            fail("COPY_NOTIFY with a %s netloc returned NFS4ERR_BADXDR; a "
+                 "well-formed but unsupported netloc should return "
+                 "NFS4ERR_NOTSUPP" % name)
+        check(res, [NFS4_OK, NFS4ERR_NOTSUPP],
+              msg="COPY_NOTIFY with a %s netloc" % name)
+
+def testCopyNotifyNoFh(t, env):
+    """COPY_NOTIFY without a current filehandle should fail
+
+    FLAGS: copy
+    CODE: CPNOTIFY3
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+
+    ops = [op.copy_notify(env.stateid0, _server_netloc(env))]
+    res = sess.compound(ops)
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+    check(res, NFS4ERR_NOFILEHANDLE, msg="COPY_NOTIFY with no filehandle")
