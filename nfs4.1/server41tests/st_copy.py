@@ -272,3 +272,18 @@ def testCopyBadSourceStateid(t, env):
     res = _do_copy(sess, src_fh, _bad_stateid(), dst_fh, dst_stateid,
                    count=1024, synchronous=1)
     check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad source stateid")
+
+def testCopyBadDestStateid(t, env):
+    """COPY with an invalid destination stateid should fail
+
+    FLAGS: copy
+    CODE: COPY9
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    write_file(sess, src_fh, b"data", 0, src_stateid)
+    dst_fh, _dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, _bad_stateid(),
+                   count=4, synchronous=1)
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad dest stateid")
