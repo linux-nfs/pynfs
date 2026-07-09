@@ -287,3 +287,16 @@ def testCopyBadDestStateid(t, env):
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, _bad_stateid(),
                    count=4, synchronous=1)
     check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad dest stateid")
+
+def testOffloadStatusNoState(t, env):
+    """OFFLOAD_STATUS with a fabricated stateid should fail
+
+    FLAGS: copy
+    CODE: COPY10
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, _stateid = _create_and_open(sess, env.testname(t))
+
+    ops = [op.putfh(src_fh), op.offload_status(_bad_stateid())]
+    res = sess.compound(ops)
+    check(res, NFS4ERR_BAD_STATEID, msg="OFFLOAD_STATUS with bad stateid")
