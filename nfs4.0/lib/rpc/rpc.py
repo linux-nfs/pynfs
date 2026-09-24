@@ -315,6 +315,33 @@ class RPCClient(object):
         out.settimeout(self.timeout)
         self.lock.release()
         return out
+
+    def reconnect_same_port(self):
+        """Drop the current connection and reconnect from the same local
+        port, so the server sees a new transport with an unchanged
+        (address, port) cache key. Used to test duplicate reply cache
+        behavior across connections.
+
+        The old socket is reset (RST) rather than closed gracefully: a
+        graceful close leaves the 4-tuple unusable until the server
+        also closes, while an RST frees the source port immediately.
+        """
+        t = threading.currentThread()
+        self.lock.acquire()
+        try:
+            old = self._socket[t]
+            saddr = old.getsockname()
+            old.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                           struct.pack('ii', 1, 0))
+            old.close()
+            out = self._socket[t] = socket.socket(self.af, socket.SOCK_STREAM)
+            out.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            out.bind(saddr)
+            out.connect((self.remotehost, self.remoteport))
+            out.settimeout(self.timeout)
+        finally:
+            self.lock.release()
+        return out
         
     def send(self, procedure, data=b'', program=None, version=None):
         """Send an RPC call to the server

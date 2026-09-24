@@ -4,7 +4,7 @@ from xdrdef.nfs4_type import *
 import nfs_ops
 op = nfs_ops.NFS4ops()
 
-def _replay(env, c, ops, error=NFS4_OK):
+def _replay(env, c, ops, error=NFS4_OK, newconn=False):
     # Can send in an error list, but replays must return same error as orig
     if type(error) is list:
         check_funct = check
@@ -17,6 +17,9 @@ def _replay(env, c, ops, error=NFS4_OK):
     orig_funct = c.get_new_xid
     try:
         c.get_new_xid = lambda : xid
+
+        if newconn:
+            c.reconnect_same_port()
 
         # note: this is really cheesy: we happen to know the current
         # Linux server implementation will drop a replay if it comes
@@ -260,4 +263,4 @@ def testMkdirReplay(t, env):
     c = env.c1
     c.init_connection()
     ops = c.go_home() + [op.create(createtype4(NF4DIR), t.word(), {})]
-    _replay(env, c, ops)
+    _replay(env, c, ops, newconn=True)
