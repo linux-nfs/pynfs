@@ -2,10 +2,11 @@ from xdrdef.nfs4_const import *
 from xdrdef.nfs4_type import *
 import nfs_ops
 op = nfs_ops.NFS4ops()
-from .environment import check, fail, create_file
+from .environment import check, fail, create_file, use_obj, \
+    get_blocksize
 from block import Packer as BlockPacker, Unpacker as BlockUnpacker, \
-    PNFS_BLOCK_READWRITE_DATA, pnfs_block_layoutupdate4, \
-    pnfs_block_extent4
+    PNFS_BLOCK_READWRITE_DATA, PNFS_BLOCK_READ_DATA, \
+    pnfs_block_layoutupdate4, pnfs_block_extent4
 from nfs4lib import FancyNFS4Packer, get_nfstime
 
 
@@ -215,3 +216,88 @@ def testSplitCommit(t, env):
                            layoutupdate4(LAYOUT4_BLOCK_VOLUME, p.get_buffer()))]
     res = sess.compound(ops)
     check(res)
+
+def testRWExtentsContiguous(t, env):
+    """RW layout over a hole between allocated blocks has contiguous extents
+
+    The server allocates the hole for the layout.  Check three of the
+    rules in RFC 5663 section 2.3.1: the extents are ordered by offset,
+    the writable extents (all but PNFS_BLOCK_READ_DATA) are logically
+    contiguous, and the first extent contains the requested offset.  A
+    server that maps each extent in full can return the extent that the
+    allocation merges with the ones before it, overlapping them.  The
+    minimum length is one block, so that a server that returns one
+    extent per LAYOUTGET does not have to refuse the request.  Warn if
+    the layout does not cover the three blocks or they are not contiguous
+    on the volume, as then no merge could be seen.
+
+    FLAGS: block
+    CODE: BLOCK5
+    VERS: 2-
+    """
+    sess = env.c1.new_pnfs_client_session(env.testname(t))
+    bs = get_blocksize(sess, use_obj(env.opts.path))
+    res = create_file(sess, env.testname(t))
+    check(res)
+    fh = res.resarray[-1].object
+    open_stateid = res.resarray[-2].stateid
+    # Allocate three blocks, then deallocate the middle one: the block
+    # the server allocates for the hole is likely to be that one, and to
+    # merge with both neighbours.  (On Linux nfsd over XFS the freed block
+    # can be reused at once on a sync export, where DEALLOCATE commits.)
+    res = sess.compound([op.putfh(fh), op.allocate(open_stateid, 0, 3*bs)])
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("ALLOCATE is not supported")
+    check(res)
+    res = sess.compound([op.putfh(fh), op.deallocate(open_stateid, bs, bs)])
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("DEALLOCATE is not supported")
+    check(res)
+    ops = [op.putfh(fh),
+           op.layoutget(False, LAYOUT4_BLOCK_VOLUME, LAYOUTIOMODE4_RW,
+                        0, 3*bs, bs, open_stateid, 0xffff)]
+    res = sess.compound(ops)
+    check(res)
+    found = False
+    blocks = {}
+    for layout in res.resarray[-1].logr_layout:
+        p = BlockUnpacker(layout.loc_body)
+        opaque = p.unpack_pnfs_block_layout4()
+        p.done()
+        ext = [(e.bex_file_offset, e.bex_length, e.bex_state)
+               for e in opaque.blo_extents]
+        if not ext:
+            fail("No extents in layout %d+%d" %
+                 (layout.lo_offset, layout.lo_length))
+        for a, b in zip(ext, ext[1:]):
+            if b[0] < a[0] or (b[0] == a[0] and
+                               a[2] != PNFS_BLOCK_READ_DATA and
+                               b[2] == PNFS_BLOCK_READ_DATA):
+                fail("Extents %s and %s are not in order" % (a, b))
+        writable = [e for e in ext if e[2] != PNFS_BLOCK_READ_DATA]
+        for a, b in zip(writable, writable[1:]):
+            if b[0] != a[0] + a[1]:
+                fail("Writable extents %s and %s are not logically "
+                     "contiguous" % (a, b))
+        if layout.lo_offset <= 0 < layout.lo_offset + layout.lo_length:
+            found = True
+            if not ext[0][0] <= 0 < ext[0][0] + ext[0][1]:
+                fail("First extent %s does not contain offset 0" %
+                     (ext[0],))
+        for e in opaque.blo_extents:
+            if e.bex_state == PNFS_BLOCK_READ_DATA:
+                continue
+            off = e.bex_file_offset
+            for i in range(3):
+                if off <= i*bs < off + e.bex_length:
+                    blocks[i] = (e.bex_vol_id,
+                                 e.bex_storage_offset + i*bs - off)
+    if not found:
+        fail("No layout contains offset 0")
+    if len(blocks) < 3:
+        t.pass_warn("The layout does not cover all three blocks, so a "
+                    "merge could not be seen")
+    if blocks[0][0] != blocks[1][0] or blocks[1][0] != blocks[2][0] or \
+       blocks[1][1] != blocks[0][1] + bs or blocks[2][1] != blocks[1][1] + bs:
+        t.pass_warn("The three blocks are not contiguous on the volume, "
+                    "so there were no extents to merge")
