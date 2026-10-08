@@ -727,3 +727,76 @@ def testClaimFHUpgradeReadDeleg(t, env):
     check(res)
     res = close_file(sess1, fh, stateid=upgraded)
     check(res)
+
+def testClaimFHAfterRecall(t, env):
+    """OPEN(CLAIM_FH) with WANT_READ_DELEG after the delegation was
+       recalled and the conflicting open has been closed
+
+    The request is made three times: right after the conflicting open
+    is closed, 65 seconds later, and 100 seconds later. A server can
+    refuse a delegation on a recently recalled file for a while, and
+    it can age that refusal only when a request arrives. The last
+    request shows whether the refusal ever ends. Any reply may carry
+    a delegation or WND4_CONTENTION.
+
+    FLAGS: open deleg
+    CODE: DELEG30
+    """
+    recall = threading.Event()
+    def pre_hook(arg, env):
+        env.notify = recall.set
+    def post_hook(arg, env, res):
+        return res
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    sess1.client.cb_pre_hook(OP_CB_RECALL, pre_hook)
+    sess1.client.cb_post_hook(OP_CB_RECALL, post_hook)
+    access = OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG
+    fh, stateid, deleg = __create_file_with_deleg(sess1, name, access)
+
+    sess2 = env.c1.new_client_session(b"%s_2" % name)
+    open_op = op.open(0, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_DENY_NONE,
+                      open_owner4(0, b"My Open Owner 2"),
+                      openflag4(OPEN4_NOCREATE), open_claim4(CLAIM_NULL, name))
+    slot = sess2.compound_async(env.home + [open_op])
+    completed = recall.wait(2)
+    env.sleep(.1)
+    res = sess1.compound([op.putfh(fh), op.delegreturn(deleg.read.stateid)])
+    check(res)
+    res = sess2.listen(slot)
+    if not completed:
+        fail("delegation break not received")
+    for i in range(5):
+        if res.status != NFS4ERR_DELAY:
+            break
+        env.sleep(1)
+        res = sess2.compound(env.home + [open_op])
+    check(res)
+    res = close_file(sess2, fh, stateid=res.resarray[-1].stateid)
+    check(res)
+
+    passed = True
+    results = []
+    elapsed = 0
+    for delay in (0, 65, 100):
+        # Sleep in short steps so that the lease does not expire
+        while elapsed < delay:
+            env.sleep(5)
+            elapsed += 5
+            check(sess1.compound([]))
+        res = _open_claim_fh(sess1, fh, name, access)
+        check(res)
+        stateid = res.resarray[-1].stateid
+        deleg = res.resarray[-1].delegation
+        _delegreturn(sess1, fh, deleg)
+        if (not _got_deleg(deleg) and
+            (deleg.delegation_type != OPEN_DELEGATE_NONE_EXT or
+             deleg.ond_why != WND4_CONTENTION)):
+            passed = False
+        results.append("after %i seconds: %s" % (delay, _deleg_desc(deleg)))
+    results = "; ".join(results)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
+    if not passed:
+        fail(results)
+    print(results)
