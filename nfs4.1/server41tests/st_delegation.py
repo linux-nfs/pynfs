@@ -918,3 +918,34 @@ def testClaimFHXorDeleg(t, env):
     check(res)
     res = close_file(sess1, fh, stateid=upgraded)
     check(res)
+
+def testClaimFHDelegAfterClose(t, env):
+    """A delegation from OPEN(CLAIM_FH) by a second open-owner outlives
+       the CLOSE of that owner's open
+
+    FLAGS: open deleg all
+    CODE: DELEG34
+    """
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    res = create_file(sess1, name, access=OPEN4_SHARE_ACCESS_READ |
+                      OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+    check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
+
+    res = _open_claim_fh_retry(sess1, fh, b"%s_2" % name,
+                               OPEN4_SHARE_ACCESS_READ |
+                               OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
+    deleg = res.resarray[-1].delegation
+    if deleg.delegation_type != OPEN_DELEGATE_READ:
+        _delegreturn(sess1, fh, deleg)
+        fail("Expected a read delegation, got %s" % _deleg_desc(deleg))
+    res = close_file(sess1, fh, stateid=res.resarray[-1].stateid)
+    check(res)
+    _check_deleg_stateid(sess1, deleg.read.stateid)
+
+    res = sess1.compound([op.putfh(fh), op.delegreturn(deleg.read.stateid)])
+    check(res)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
