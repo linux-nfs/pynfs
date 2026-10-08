@@ -686,3 +686,44 @@ def testClaimFHReadDeleg(t, env):
     check(res)
     res = close_file(sess1, fh, stateid=stateid)
     check(res)
+
+def testClaimFHUpgradeReadDeleg(t, env):
+    """OPEN(CLAIM_FH) with WANT_READ_DELEG from an open-owner that
+       already has the file open
+
+    FLAGS: open deleg all
+    CODE: DELEG29
+    """
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    res = create_file(sess1, name, access=OPEN4_SHARE_ACCESS_READ |
+                      OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+    check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
+
+    # The second pass is the retry that _open_claim_fh_retry() makes.
+    # Each OPEN bumps the seqid, so count them here.
+    seqid = stateid.seqid
+    for attempt in range(2):
+        res = _open_claim_fh(sess1, fh, name, OPEN4_SHARE_ACCESS_READ |
+                             OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
+        check(res)
+        seqid += 1
+        upgraded = res.resarray[-1].stateid
+        if upgraded.other != stateid.other:
+            fail("OPEN by the same open-owner returned a different stateid")
+        if upgraded.seqid != seqid:
+            fail("Expected open stateid seqid %i, got %i" %
+                 (seqid, upgraded.seqid))
+        deleg = res.resarray[-1].delegation
+        if _got_deleg(deleg):
+            break
+    if deleg.delegation_type != OPEN_DELEGATE_READ:
+        _delegreturn(sess1, fh, deleg)
+        fail("Expected a read delegation, got %s" % _deleg_desc(deleg))
+
+    res = sess1.compound([op.putfh(fh), op.delegreturn(deleg.read.stateid)])
+    check(res)
+    res = close_file(sess1, fh, stateid=upgraded)
+    check(res)
