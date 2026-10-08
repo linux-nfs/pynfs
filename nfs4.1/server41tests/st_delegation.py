@@ -800,3 +800,62 @@ def testClaimFHAfterRecall(t, env):
     if not passed:
         fail(results)
     print(results)
+
+def _check_deleg_stateid(sess, stateid):
+    res = sess.compound([op.test_stateid([stateid])])
+    check(res)
+    status = res.resarray[0].tsr_status_codes[0]
+    if status != NFS4_OK:
+        fail("TEST_STATEID on the delegation stateid returned %s" %
+             nfsstat4[status])
+
+def _testHolderSetattr(t, env, access, deleg_type):
+    recall = threading.Event()
+    def pre_hook(arg, env):
+        env.notify = recall.set
+    def post_hook(arg, env, res):
+        return res
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    sess1.client.cb_pre_hook(OP_CB_RECALL, pre_hook)
+    sess1.client.cb_post_hook(OP_CB_RECALL, post_hook)
+
+    fh, stateid, deleg = __create_file_with_deleg(sess1, name, access)
+    if deleg.delegation_type != deleg_type:
+        _delegreturn(sess1, fh, deleg)
+        t.fail_support("Wanted %s, got %s" %
+                       (open_delegation_type4[deleg_type], _deleg_desc(deleg)))
+
+    res = sess1.compound([op.putfh(fh),
+                          op.setattr(nfs4lib.state00, {FATTR4_MODE: 0o600})])
+    recalled = recall.wait(2)
+    if recalled or res.status != NFS4_OK:
+        _delegreturn(sess1, fh, deleg)
+    if recalled:
+        fail("SETATTR by the delegation holder recalled its delegation")
+    check(res)
+    _check_deleg_stateid(sess1, deleg.stateid)
+
+    _delegreturn(sess1, fh, deleg)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
+
+def testWriteDelegHolderSetattr(t, env):
+    """SETATTR by the holder of a write delegation must not recall it
+
+    FLAGS: writedelegations deleg all
+    CODE: DELEG31
+    """
+    _testHolderSetattr(t, env, OPEN4_SHARE_ACCESS_BOTH |
+                       OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG,
+                       OPEN_DELEGATE_WRITE)
+
+def testReadDelegHolderSetattr(t, env):
+    """SETATTR by the holder of a read delegation must not recall it
+
+    FLAGS: deleg all
+    CODE: DELEG32
+    """
+    _testHolderSetattr(t, env, OPEN4_SHARE_ACCESS_READ |
+                       OPEN4_SHARE_ACCESS_WANT_READ_DELEG,
+                       OPEN_DELEGATE_READ)
