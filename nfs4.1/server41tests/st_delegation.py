@@ -625,3 +625,64 @@ def testCbGetattrAfterSyncWrite(t, env):
     if compareTimes(attrs2[FATTR4_TIME_MODIFY], attrs4[FATTR4_TIME_MODIFY]) != 0:
         fail(f"mtime after write ({attrs2[FATTR4_TIME_MODIFY]}) != "
              f"mtime from delegreturn ({attrs4[FATTR4_TIME_MODIFY]})")
+
+def _open_claim_fh(sess, fh, owner, access):
+    """OPEN by filehandle. No GETFH follows, so OPEN is the last result."""
+    open_op = op.open(0, access, OPEN4_SHARE_DENY_NONE, open_owner4(0, owner),
+                      openflag4(OPEN4_NOCREATE), open_claim4(CLAIM_FH))
+    return sess.compound([op.putfh(fh), open_op])
+
+def _open_claim_fh_retry(sess, fh, owner, access):
+    """Send OPEN(CLAIM_FH) again if the first reply carries no delegation
+
+    The first OPEN after CREATE_SESSION can race the server's backchannel
+    probe.
+    """
+    res = _open_claim_fh(sess, fh, owner, access)
+    check(res)
+    if not _got_deleg(res.resarray[-1].delegation):
+        res = _open_claim_fh(sess, fh, owner, access)
+        check(res)
+    return res
+
+def _delegreturn(sess, fh, deleg):
+    """Return the delegation, if OPEN granted one"""
+    if _got_deleg(deleg):
+        res = sess.compound([op.putfh(fh), op.delegreturn(deleg.stateid)])
+        check(res)
+
+def _deleg_desc(deleg):
+    desc = "%s" % open_delegation_type4.get(deleg.delegation_type,
+                                            deleg.delegation_type)
+    if deleg.delegation_type == OPEN_DELEGATE_NONE_EXT:
+        desc += ", ond_why %s" % why_no_delegation4.get(deleg.ond_why,
+                                                        deleg.ond_why)
+    return desc
+
+def testClaimFHReadDeleg(t, env):
+    """OPEN(CLAIM_FH) with WANT_READ_DELEG on a file with no open state
+
+    FLAGS: open deleg all
+    CODE: DELEG28
+    """
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    res = create_file(sess1, name, access=OPEN4_SHARE_ACCESS_BOTH |
+                      OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+    check(res)
+    fh = res.resarray[-1].object
+    res = close_file(sess1, fh, stateid=res.resarray[-2].stateid)
+    check(res)
+
+    res = _open_claim_fh_retry(sess1, fh, name, OPEN4_SHARE_ACCESS_READ |
+                               OPEN4_SHARE_ACCESS_WANT_READ_DELEG)
+    stateid = res.resarray[-1].stateid
+    deleg = res.resarray[-1].delegation
+    if deleg.delegation_type != OPEN_DELEGATE_READ:
+        _delegreturn(sess1, fh, deleg)
+        fail("Expected a read delegation, got %s" % _deleg_desc(deleg))
+
+    res = sess1.compound([op.putfh(fh), op.delegreturn(deleg.read.stateid)])
+    check(res)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
