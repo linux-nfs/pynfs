@@ -949,3 +949,60 @@ def testClaimFHDelegAfterClose(t, env):
     check(res)
     res = close_file(sess1, fh, stateid=stateid)
     check(res)
+
+def _testDelegXgrade(t, env, access, held_type, want_access, want_type, why):
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    fh, stateid, deleg = __create_file_with_deleg(sess1, name, access)
+    if deleg.delegation_type != held_type:
+        _delegreturn(sess1, fh, deleg)
+        t.fail_support("Wanted %s, got %s" %
+                       (open_delegation_type4[held_type], _deleg_desc(deleg)))
+
+    res = _open_claim_fh(sess1, fh, b"%s_2" % name, want_access)
+    check(res)
+    stateid2 = res.resarray[-1].stateid
+    xgrade = res.resarray[-1].delegation
+    if xgrade.delegation_type == want_type:
+        deleg = xgrade
+
+    # Return the delegation first, so that a failure does not leave it
+    # behind to block the removal of the test file
+    _delegreturn(sess1, fh, deleg)
+    res = close_file(sess1, fh, stateid=stateid2)
+    check(res)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
+
+    if (xgrade.delegation_type != want_type and
+        (xgrade.delegation_type != OPEN_DELEGATE_NONE_EXT or
+         xgrade.ond_why != why)):
+        fail("Expected %s or %s, got %s" %
+             (open_delegation_type4[want_type], why_no_delegation4[why],
+              _deleg_desc(xgrade)))
+
+def testReadDelegUpgrade(t, env):
+    """WANT_WRITE_DELEG from the holder of a read delegation gets a
+       write delegation or WND4_NOT_SUPP_UPGRADE
+
+    FLAGS: open deleg all
+    CODE: DELEG35
+    """
+    _testDelegXgrade(t, env, OPEN4_SHARE_ACCESS_READ |
+                     OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN_DELEGATE_READ,
+                     OPEN4_SHARE_ACCESS_BOTH |
+                     OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG, OPEN_DELEGATE_WRITE,
+                     WND4_NOT_SUPP_UPGRADE)
+
+def testWriteDelegDowngrade(t, env):
+    """WANT_READ_DELEG from the holder of a write delegation gets a
+       read delegation or WND4_NOT_SUPP_DOWNGRADE
+
+    FLAGS: writedelegations deleg all
+    CODE: DELEG36
+    """
+    _testDelegXgrade(t, env, OPEN4_SHARE_ACCESS_BOTH |
+                     OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG, OPEN_DELEGATE_WRITE,
+                     OPEN4_SHARE_ACCESS_READ |
+                     OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN_DELEGATE_READ,
+                     WND4_NOT_SUPP_DOWNGRADE)
