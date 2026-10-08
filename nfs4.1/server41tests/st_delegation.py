@@ -859,3 +859,62 @@ def testReadDelegHolderSetattr(t, env):
     _testHolderSetattr(t, env, OPEN4_SHARE_ACCESS_READ |
                        OPEN4_SHARE_ACCESS_WANT_READ_DELEG,
                        OPEN_DELEGATE_READ)
+
+def testClaimFHXorDeleg(t, env):
+    """OPEN(CLAIM_FH) with WANT_OPEN_XOR_DELEGATION from a second
+       open-owner returns a delegation and no open stateid
+
+    FLAGS: open deleg all
+    CODE: DELEG33
+    """
+    name = env.testname(t)
+    sess1 = env.c1.new_client_session(b"%s_1" % name)
+    res = sess1.compound([op.putrootfh(),
+                          op.getattr(nfs4lib.list2bitmap([FATTR4_OPEN_ARGUMENTS]))])
+    check(res)
+    caps = res.resarray[-1].obj_attributes
+    xor = 1 << OPEN_ARGS_SHARE_ACCESS_WANT_OPEN_XOR_DELEGATION
+    if (FATTR4_OPEN_ARGUMENTS not in caps or
+        not caps[FATTR4_OPEN_ARGUMENTS].oa_share_access_want & xor):
+        t.fail_support("Server does not advertise WANT_OPEN_XOR_DELEGATION")
+
+    res = create_file(sess1, name, access=OPEN4_SHARE_ACCESS_READ |
+                      OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+    check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
+
+    owner2 = b"%s_2" % name
+    access = (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG |
+              OPEN4_SHARE_ACCESS_WANT_OPEN_XOR_DELEGATION)
+    res = _open_claim_fh(sess1, fh, owner2, access)
+    check(res)
+    if not _got_deleg(res.resarray[-1].delegation):
+        # Close first, so that the retry is not an upgrade of this open
+        res = close_file(sess1, fh, stateid=res.resarray[-1].stateid)
+        check(res)
+        res = _open_claim_fh(sess1, fh, owner2, access)
+        check(res)
+    deleg = res.resarray[-1].delegation
+    if deleg.delegation_type != OPEN_DELEGATE_READ:
+        fail("Expected a read delegation, got %s" % _deleg_desc(deleg))
+    if not res.resarray[-1].rflags & OPEN4_RESULT_NO_OPEN_STATEID:
+        _delegreturn(sess1, fh, deleg)
+        fail("Got a delegation, but OPEN4_RESULT_NO_OPEN_STATEID is not set")
+
+    # An OPEN by the first open-owner bumps its seqid once. Any other
+    # seqid means the second open-owner's OPEN changed that stateid.
+    res = _open_claim_fh(sess1, fh, name, OPEN4_SHARE_ACCESS_READ |
+                         OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+    check(res)
+    upgraded = res.resarray[-1].stateid
+    if upgraded.other != stateid.other:
+        fail("OPEN by the same open-owner returned a different stateid")
+    if upgraded.seqid != stateid.seqid + 1:
+        fail("Expected open stateid seqid %i, got %i" %
+             (stateid.seqid + 1, upgraded.seqid))
+
+    res = sess1.compound([op.putfh(fh), op.delegreturn(deleg.read.stateid)])
+    check(res)
+    res = close_file(sess1, fh, stateid=upgraded)
+    check(res)
