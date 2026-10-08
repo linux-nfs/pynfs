@@ -1006,3 +1006,27 @@ def testWriteDelegDowngrade(t, env):
                      OPEN4_SHARE_ACCESS_READ |
                      OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN_DELEGATE_READ,
                      WND4_NOT_SUPP_DOWNGRADE)
+
+def testWantCancel(t, env):
+    """OPEN with WANT_CANCEL gets no delegation and WND4_CANCELLED
+
+    FLAGS: open deleg all
+    CODE: DELEG37
+    """
+    sess1 = env.c1.new_client_session(b"%s_1" % env.testname(t))
+    res = create_file(sess1, env.testname(t),
+                      access=OPEN4_SHARE_ACCESS_READ |
+                      OPEN4_SHARE_ACCESS_WANT_CANCEL)
+    check(res)
+    fh = res.resarray[-1].object
+    deleg = res.resarray[-2].delegation
+    _delegreturn(sess1, fh, deleg)
+    res = close_file(sess1, fh, stateid=res.resarray[-2].stateid)
+    check(res)
+    if deleg.delegation_type == OPEN_DELEGATE_NONE:
+        fail("Got OPEN_DELEGATE_NONE, expected OPEN_DELEGATE_NONE_EXT")
+    if deleg.delegation_type != OPEN_DELEGATE_NONE_EXT:
+        fail("Got a delegation (type %d) despite WANT_CANCEL" %
+             deleg.delegation_type)
+    if deleg.ond_why != WND4_CANCELLED:
+        fail("Got ond_why %d, expected WND4_CANCELLED" % deleg.ond_why)
