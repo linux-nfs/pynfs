@@ -310,6 +310,61 @@ def access_mask_to_str(mask):
     ]
     return " | ".join(name for bit, name in perms if mask & bit) or "(none)"
 
+def verify_acl(returned_acl, expected_acl):
+    """Verify that returned ACL contains expected ACEs
+
+    Server may insert additional ACEs anywhere, but the requested ones
+    must be present in the requested order, with the requested type,
+    principal, and flags, and with at least the requested permissions.
+
+    Raises AssertionError if verification fails.
+    """
+    if len(returned_acl) < len(expected_acl):
+        raise AssertionError(
+            "Returned ACL has fewer entries than requested: "
+            "expected at least %d, got %d" % (len(expected_acl), len(returned_acl)))
+
+    # Verify the ACEs we set are present (server may add additional ACEs)
+    pos = 0
+    for i, expected_ace in enumerate(expected_acl):
+        # RFC 8881 Section 6.2.1.4.1: ACE4_IDENTIFIER_GROUP is ignored on
+        # the special identifiers
+        flag_mask = ~0
+        if expected_ace.who.endswith(b"@"):
+            flag_mask = ~ACE4_IDENTIFIER_GROUP
+        expected_flag = expected_ace.flag & flag_mask
+        # A server may split one principal's grant across several ACEs,
+        # so keep searching past a candidate whose mask falls short and
+        # remember it for the error message
+        candidate = None
+        for j in range(pos, len(returned_acl)):
+            returned_ace = returned_acl[j]
+            if (returned_ace.type != expected_ace.type or
+                returned_ace.who != expected_ace.who or
+                (returned_ace.flag & flag_mask) != expected_flag):
+                continue
+            candidate = returned_ace
+            # Check that requested permissions are present (server may add more)
+            if (returned_ace.access_mask & expected_ace.access_mask) == expected_ace.access_mask:
+                break
+        else:
+            if candidate is None:
+                raise AssertionError(
+                    "ACE %d (type %d, flag 0x%x, who %s) not found in returned ACL" %
+                    (i, expected_ace.type, expected_ace.flag, expected_ace.who))
+            returned_ace = candidate
+            missing = expected_ace.access_mask & ~returned_ace.access_mask
+            raise AssertionError(
+                "ACE %d access_mask mismatch:\n"
+                "  Expected: %s\n"
+                "  Got:      %s\n"
+                "  Missing:  %s" %
+                (i,
+                 access_mask_to_str(expected_ace.access_mask),
+                 access_mask_to_str(returned_ace.access_mask),
+                 access_mask_to_str(missing)))
+        pos = j + 1
+
 def printableacl(acl):
     type_str = ["ACCESS", "DENY"]
     out = ""
