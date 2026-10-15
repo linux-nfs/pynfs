@@ -277,6 +277,9 @@ debug_fail = False
 def fail(msg):
     raise testmod.FailureException(msg)
 
+def unsupported(msg):
+    raise testmod.UnsupportedException(msg)
+
 def check(res, stat=NFS4_OK, msg=None, warnlist=[]):
 
     if type(stat) is str:
