@@ -1,0 +1,93 @@
+name: Set up pynfs and a loopback knfsd
+description: >
+  Build pynfs in a venv, then configure and start the kernel NFS
+  server on the runner with /export/pynfs exported to localhost.
+
+inputs:
+  python-version:
+    description: Python version to install with setup-python
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install system packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libkrb5-dev nfs-kernel-server
+
+    - name: Install Python packages
+      shell: bash
+      run: pip install setuptools ply xdrlib3 gssapi
+
+    - name: Generate XDR code
+      shell: bash
+      run: |
+        set -e
+        for d in xdr rpc nfs4.1 nfs4.0; do
+          (cd "$d" && python setup.py build)
+        done
+
+    # Short lease and grace periods keep the reboot and expiry tests
+    # from sleeping through nfsd's 90 second defaults.  lockd has a
+    # grace period of its own, 50 seconds by default, that blocks
+    # locks but not opens, and nothing under /proc reports it.
+    # nfsd skips its own grace period when no client needs to
+    # reclaim, so on a fresh install lockd's is the one that is still
+    # running when the first test sends a LOCK.  The export has
+    # no fsid=0 so that the NFS path and the local path are the same;
+    # localhost_helper.sh operates on the local path.  "insecure"
+    # admits the high source ports pynfs uses.
+    - name: Configure nfsd
+      shell: bash
+      run: |
+        set -e
+        sudo tee -a /etc/nfs.conf > /dev/null <<'EOF'
+
+        [nfsd]
+        vers4.0=y
+        vers4.1=y
+        vers4.2=y
+        lease-time=10
+        grace-time=10
+        EOF
+        sudo modprobe lockd
+        sudo sysctl -w fs.nfs.nlm_grace_period=10
+        sudo mkdir -p /export/pynfs
+        echo '/export/pynfs *(rw,insecure,no_root_squash,no_subtree_check)' \
+          | sudo tee /etc/exports > /dev/null
+        sudo systemctl restart nfs-server
+        sleep $(( $(sudo sysctl -n fs.nfs.nlm_grace_period) + 1 ))
+
+    # Everything under /proc/fs/nfsd is root-only.
+    - name: Verify nfsd is up
+      shell: bash
+      run: |
+        set -e
+        sudo exportfs -v | grep -q '^/export/pynfs'
+        versions=$(sudo cat /proc/fs/nfsd/versions)
+        echo "versions: $versions"
+        case " $versions " in
+          *" -4.0 "*|*" -4.1 "*|*" -4.2 "*)
+            echo "an NFSv4 minor version is disabled" >&2; exit 1 ;;
+        esac
+        grep -qw -- '+4.1' <<<"$versions"
+        grep -qw -- '+4.2' <<<"$versions"
+        test "$(sudo cat /proc/fs/nfsd/nfsv4leasetime)" = 10
+        test "$(sudo cat /proc/fs/nfsd/nfsv4gracetime)" = 10
+        test "$(sudo sysctl -n fs.nfs.nlm_grace_period)" = 10
+        for i in $(seq 1 30); do
+          if [ "$(sudo cat /proc/fs/nfsd/v4_end_grace)" = Y ]; then
+            echo "grace period over"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "nfsd did not leave the grace period" >&2
+        exit 1
