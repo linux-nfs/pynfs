@@ -9,6 +9,10 @@ import threading
 import logging
 log = logging.getLogger("test.env")
 
+def _getleasetime(sess):
+    res = sess.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
+    return res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
+
 def testCbNotifyLockExpiredClient(t, env):
     """Tests CB_NOTIFY_LOCK with an expired client
 
@@ -60,8 +64,9 @@ def testCbNotifyLockExpiredClient(t, env):
     check(res, NFS4ERR_DENIED)
 
     # keep the first client active, allow the second client to expire
-    for i in range(3):
-        env.sleep(60)
+    lease_time = _getleasetime(sess1)
+    for i in range(4):
+        env.sleep(lease_time // 2, "keeping the first client active")
         res = sess1.compound([])
         check(res, NFS4_OK)
 
