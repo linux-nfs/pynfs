@@ -2,7 +2,7 @@ from .st_create_session import create_session
 from xdrdef.nfs4_const import *
 
 from .environment import check, fail, create_file, open_file, close_file
-from .environment import open_create_file_op, use_obj
+from .environment import open_create_file_op, use_obj, get_leasetime
 from xdrdef.nfs4_type import open_owner4, openflag4, createhow4, open_claim4
 from xdrdef.nfs4_type import creatverfattr, fattr4, stateid4, locker4, lock_owner4
 from xdrdef.nfs4_type import open_to_lock_owner4
@@ -13,10 +13,6 @@ import logging
 import datetime
 
 log = logging.getLogger("test.env")
-
-def _getleasetime(sess):
-    res = sess.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
-    return res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
 
 def cour_lockargs(fh, stateid):
     open_to_lock_owner = open_to_lock_owner4( 0, stateid, 0, lock_owner4(0, b"lock1"))
@@ -41,7 +37,7 @@ def testLockSleepLockU(t, env):
     res = sess1.compound(cour_lockargs(fh, stateid))
     check(res, NFS4_OK)
 
-    lease_time = _getleasetime(sess1)
+    lease_time = get_leasetime(sess1)
     env.sleep(lease_time * 2, "twice the lease period")
 
     lock_stateid = res.resarray[-1].lock_stateid
@@ -71,7 +67,7 @@ def testLockSleepLock(t, env):
     res = sess1.compound(cour_lockargs(fh, stateid))
     check(res, NFS4_OK)
 
-    lease_time = _getleasetime(sess1)
+    lease_time = get_leasetime(sess1)
     env.sleep(lease_time + 10, "the lease period + 10 secs")
 
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
@@ -127,7 +123,7 @@ def testShareReservation00(t, env):
 
     """ force lease of both c1 to expire """
     log.info("force lease to expire...\n")
-    lease_time = _getleasetime(sess1)
+    lease_time = get_leasetime(sess1)
     env.sleep(lease_time + 10, "the lease period + 10 secs")
 
     """ 3rd client """
@@ -208,7 +204,7 @@ def testShareReservationDB02(t, env):
 
     """ force lease of client1 to expire """
     log.info("force lease to expire...\n")
-    lease_time = _getleasetime(sess1)
+    lease_time = get_leasetime(sess1)
     env.sleep(lease_time + 10, "the lease period + 10 secs")
 
     """ create 2nd client """
@@ -265,7 +261,7 @@ def testShareReservationDB03(t, env):
 
     """ force lease of client1 and client2 to expire """
     log.info("force lease to expire...\n")
-    lease_time = _getleasetime(sess1)
+    lease_time = get_leasetime(sess1)
     env.sleep(lease_time + 10, "the lease period + 10 secs")
 
     """ create 3nd client """
@@ -304,7 +300,7 @@ def testExpiringManyClients(t, env):
         check(res)
 
     log.info("%s: waiting for lease\n", str(datetime.datetime.now()))
-    lease_time = _getleasetime(s)
+    lease_time = get_leasetime(s)
     env.sleep(lease_time + 10, "the lease period + 10 secs")
 
     s = env.c1.new_client_session(b"%s_Breaker" % env.testname(t))

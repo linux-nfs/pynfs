@@ -2,14 +2,10 @@ from xdrdef.nfs4_const import *
 import nfs_ops
 op = nfs_ops.NFS4ops()
 import time
-from .environment import check, fail
+from .environment import check, fail, get_leasetime
 from xdrdef.nfs4_type import *
 from rpc.rpc import RPCAcceptError, GARBAGE_ARGS, RPCTimeout
 from nfs4lib import NFS4Error, hash_oids, encrypt_oids
-
-def _getleasetime(sess):
-    res = sess.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
-    return res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
 
 def _raw_exchange_id(c, name, verf=None, cred=None, protect=None, flags=0):
     if verf is None:
@@ -493,7 +489,7 @@ def testLeasePeriod(t, env):
     # Get server's lease time
     c3 = env.c1.new_client(b"%s_3" % env.testname(t))
     sess = c3.create_session()
-    lease = _getleasetime(sess)
+    lease = get_leasetime(sess)
 
     # CREATE_SESSION
     chan_attrs = channel_attrs4(0,8192,8192,8192,128,8,[])

@@ -469,6 +469,11 @@ def do_getattrdict(sess, file, attrlist):
     check(res)
     return res.resarray[-1].obj_attributes
 
+def get_leasetime(sess):
+    res = sess.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
+    check(res)
+    return res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
+
 def create_obj(sess, path, kind=NF4DIR, attrs={FATTR4_MODE:0o755}):
     """Return ops needed to create given non-file object"""
     # Ensure using createtype4

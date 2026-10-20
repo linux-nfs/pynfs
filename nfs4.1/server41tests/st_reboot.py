@@ -1,6 +1,7 @@
 from xdrdef.nfs4_const import *
 from xdrdef.nfs4_type import *
 from .environment import check, fail, create_file, open_file, create_confirm, close_file
+from .environment import get_leasetime
 import sys
 import os
 import time
@@ -12,10 +13,6 @@ from rpc.rpc import RPCTimeout
 # NOTE - reboot tests are NOT part of the standard test suite
 
 log = logging.getLogger("test.env")
-
-def _getleasetime(sess):
-    res = sess.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
-    return res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
 
 def _waitForReboot(env):
     env.serverhelper(b"reboot")
@@ -61,14 +58,14 @@ def testRebootValid(t, env):
     sess = c.create_session()
     reclaim_complete(sess)
     fh, stateid = create_confirm(sess, owner)
-    sleeptime = 5 + _getleasetime(sess)
+    sleeptime = 5 + get_leasetime(sess)
     _waitForReboot(env)
     try:
         res = create_session(c)
         check(res, NFS4ERR_STALE_CLIENTID, "Reclaim using old clientid")
         c = env.c1.new_client(env.testname(t))
         sess = c.create_session()
-        newleasetime = _getleasetime(sess)
+        newleasetime = get_leasetime(sess)
         sleeptime = max(sleeptime, 5 + newleasetime)
         res = open_file(sess, owner, path=fh, claim_type=CLAIM_PREVIOUS,
                        access=OPEN4_SHARE_ACCESS_BOTH,
@@ -97,7 +94,7 @@ def doTestOneClientGrace(t, env, state, dup=False):
     state.c = c
     sess = c.create_session()
     state.sess = sess
-    lease_time = _getleasetime(sess)
+    lease_time = get_leasetime(sess)
     res = open_file(sess, state.owner, path=state.fh,
                    claim_type=CLAIM_PREVIOUS,
                    access=OPEN4_SHARE_ACCESS_BOTH,
@@ -174,7 +171,7 @@ def doTestRebootWithNClients(t, env, n=10, double_reboot=False,
         reclaim_complete(sess)
         fh, stateid = create_confirm(sess, owner)
         states.append(State(name, owner, c, sess, fh))
-    lease_time = _getleasetime(sess)
+    lease_time = get_leasetime(sess)
     boot_time = _waitForReboot(env)
 
     try:
@@ -295,7 +292,7 @@ def testRebootWithLateReclaim(t, env):
         path = sess.c.homedir + [b"%s_file_%i" % (owner, i)]
         tmpfh, tmpstateid = create_confirm(sess, owner, path)
         fh.append(tmpfh)
-    lease_time = _getleasetime(sess)
+    lease_time = get_leasetime(sess)
     boot_time = _waitForReboot(env)
     try:
         sleep_time = lease_time - 5
@@ -306,7 +303,7 @@ def testRebootWithLateReclaim(t, env):
         check(res, NFS4ERR_STALE_CLIENTID, "Reclaim using old clientid")
         c = env.c1.new_client(name)
         sess = c.create_session()
-        lease_time = _getleasetime(sess)
+        lease_time = get_leasetime(sess)
         # Reclaim open files, with a short delay between each open reclaim.
         # This should put us at the end of the original grace period.  The
         # server might keep extending the grace period by 1 second (up to
