@@ -72,6 +72,7 @@ setup(name = "newpynfs",
       author_email = "iisaman@citi.umich.edu",
       maintainer = "Calum Mackay",
       maintainer_email = "calum.mackay@oracle.com",
+      url = "https://github.com/linux-nfs/pynfs",
 
       package_dir = {'': 'lib'},
       packages = ['servertests', 'rpc', 'rpc.rpcsec'],
