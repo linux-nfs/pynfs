@@ -64,7 +64,7 @@ setup(name = "nfs4",
       author_email = "iisaman@citi.umich.edu",
       maintainer = "Calum Mackay",
       maintainer_email = "calum.mackay@oracle.com",
-      url = "https://linux-nfs.org/wiki/index.php/Pynfs",
+      url = "https://github.com/linux-nfs/pynfs",
       license = "GPL"
       )
 
