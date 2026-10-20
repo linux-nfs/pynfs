@@ -1,24 +1,32 @@
-Check out the latest source code from
+Clone the latest source code from:
 
-	git://git.linux-nfs.org/projects/cdmackay/pynfs.git
+	https://github.com/linux-nfs/pynfs.git
+
+The repository at git.linux-nfs.org is no longer updated.
 
 Commit your changes.  Please make sure each commit is individually
 correct and does only one thing.
 
-When you're done, send the resulting patches to calum.mackay@oracle.com and
-cc the linux-nfs@vger.kernel.org mailing list, using something like:
+When you're done, send the resulting patches
+
+	To: calum.mackay@oracle.com, jlayton@kernel.org, cel@kernel.org
+	Cc: linux-nfs@vger.kernel.org
+
+using something like:
 
 	git format-patch origin..
 	git send-email --to="calum.mackay@oracle.com" \
-			--cc="linux-nfs@vger.kernel.org 0*
+			--to="jlayton@kernel.org" \
+			--to="cel@kernel.org" \
+			--cc="linux-nfs@vger.kernel.org" 0*
 
 We generally follow similar processes to the Linux kernel, so
 
-	https://www.kernel.org/doc/html/v4.17/process/submitting-patches.html
+	https://www.kernel.org/doc/html/latest/process/submitting-patches.html
 
 may be a good source for more details.
 
-We also add that you include a line like
+We also request that you include a line like
 
 	Signed-off-by: Random J Developer <random@developer.example.org>
 
