@@ -1,0 +1,101 @@
+name: nfsd
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The suite runs as root: --maketree creates device nodes, which knfsd
+# permits only for uid 0, and localhost_helper.sh reads and writes
+# /proc/fs/nfsd, which is root-only.  testserver.py exits 0 whatever
+# the test results, so the gate step reads the JSON report instead.
+# The test step has its own timeout so that a hung RPC still leaves
+# time for the upload and gate steps to run.
+
+jobs:
+  nfs40:
+    name: nfs4.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYNFS_GROUPS: all reboot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nfsd
+
+      - name: Run tests
+        timeout-minutes: 60
+        working-directory: nfs4.0
+        run: |
+          set -o pipefail
+          sudo "$(which python)" ./testserver.py localhost:/export/pynfs \
+            --maketree --rundeps -v \
+            --serverhelper="$GITHUB_WORKSPACE/examples/localhost_helper.sh" \
+            --serverhelperarg=localhost \
+            --json="$RUNNER_TEMP/results.json" $PYNFS_GROUPS \
+            2>&1 | tee "$RUNNER_TEMP/console.log"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pynfs-nfs40-results
+          path: |
+            ${{ runner.temp }}/results.json
+            ${{ runner.temp }}/console.log
+
+      - name: Check results
+        if: always()
+        run: |
+          python "$GITHUB_WORKSPACE/.github/scripts/check-results.py" \
+            "$RUNNER_TEMP/results.json"
+
+  nfs41:
+    name: nfs4.1 (minorversion ${{ matrix.minorversion }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        minorversion: [1, 2]
+    env:
+      PYNFS_GROUPS: all reboot callback
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nfsd
+
+      - name: Run tests
+        timeout-minutes: 60
+        working-directory: nfs4.1
+        run: |
+          set -o pipefail
+          sudo "$(which python)" ./testserver.py localhost:/export/pynfs \
+            --maketree --rundeps -v \
+            --minorversion=${{ matrix.minorversion }} \
+            --serverhelper="$GITHUB_WORKSPACE/examples/localhost_helper.sh" \
+            --serverhelperarg=localhost \
+            --json="$RUNNER_TEMP/results.json" $PYNFS_GROUPS \
+            2>&1 | tee "$RUNNER_TEMP/console.log"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pynfs-nfs41-mv${{ matrix.minorversion }}-results
+          path: |
+            ${{ runner.temp }}/results.json
+            ${{ runner.temp }}/console.log
+
+      # Minor version 1 is informational until DELEG24 and DELEG25
+      # stop requesting a 4.2 attribute on a 4.1 session.
+      - name: Check results
+        if: always()
+        continue-on-error: ${{ matrix.minorversion == 1 }}
+        run: |
+          python "$GITHUB_WORKSPACE/.github/scripts/check-results.py" \
+            "$RUNNER_TEMP/results.json"

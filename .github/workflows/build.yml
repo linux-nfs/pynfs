@@ -1,0 +1,52 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libkrb5-dev
+
+      - name: Install Python packages
+        run: pip install setuptools ply xdrlib3 gssapi
+
+      # The top-level setup.py drives the sub-builds through os.system()
+      # and ignores their exit status, so run each one directly.
+      - name: Generate XDR code
+        run: |
+          set -e
+          for d in xdr rpc nfs4.1 nfs4.0; do
+            (cd "$d" && python setup.py build)
+          done
+
+      # --showflags imports every test module and exits without
+      # contacting a server.
+      - name: Import check
+        run: |
+          set -e
+          (cd nfs4.0 && python testserver.py --showflags > /dev/null)
+          (cd nfs4.1 && python testserver.py --showflags > /dev/null)
