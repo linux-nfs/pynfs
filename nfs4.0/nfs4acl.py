@@ -78,6 +78,28 @@ def mode2acl(mode, dir=False):
              nfsace4(DENIED, 0, negate(other), "EVERYONE@")
              ]
 
+def make_test_acl():
+    """Create a test ACL that maps cleanly to POSIX ACLs
+
+    Uses OWNER@, GROUP@, and EVERYONE@ to match POSIX user/group/other
+    structure, which helps servers that map NFSv4 ACLs to POSIX ACLs.
+
+    Includes both WRITE_DATA and APPEND_DATA for write permission, since
+    Linux NFS server's conservative NFSv4-to-POSIX mapping requires both
+    to grant POSIX write permission.
+    """
+    return [
+        nfsace4(ACE4_ACCESS_ALLOWED_ACE_TYPE, 0,
+                ACE4_READ_DATA | ACE4_WRITE_DATA | ACE4_APPEND_DATA | ACE4_READ_ACL,
+                b"OWNER@"),
+        nfsace4(ACE4_ACCESS_ALLOWED_ACE_TYPE, 0,
+                ACE4_READ_DATA,
+                b"GROUP@"),
+        nfsace4(ACE4_ACCESS_ALLOWED_ACE_TYPE, 0,
+                ACE4_READ_DATA,
+                b"EVERYONE@")
+    ]
+
 def acl2mode(acl):
     """Translate an acl into a 3-digit octal mode"""
     names = ["OWNER@", "GROUP@", "EVERYONE@"]
@@ -207,6 +229,177 @@ def chk_groups(acl, flags, not_mask):
         else:
             chk_triple(mask, allow, acl[0], flags | GROUP, not_mask)
         del acl[:1]
+
+def acl2mode_rfc8881(acl):
+    """
+    Compute mode from ACL according to RFC 8881 Section 6.3.2.
+
+    For each special identifier (OWNER@, GROUP@, EVERYONE@), evaluate the
+    ACL in order considering only ALLOW and DENY ACEs for EVERYONE@ and
+    the identifier under consideration. Then translate to mode bits:
+    - Read bit: Set if ACE4_READ_DATA is permitted
+    - Write bit: Set if BOTH ACE4_WRITE_DATA AND ACE4_APPEND_DATA are permitted
+    - Execute bit: Set if ACE4_EXECUTE is permitted
+
+    Returns the low-order 9 bits of the mode (user/group/other permissions).
+    """
+    identifiers = [
+        (b"OWNER@", MODE4_RUSR, MODE4_WUSR, MODE4_XUSR),
+        (b"GROUP@", MODE4_RGRP, MODE4_WGRP, MODE4_XGRP),
+        (b"EVERYONE@", MODE4_ROTH, MODE4_WOTH, MODE4_XOTH)
+    ]
+
+    mode = 0
+
+    for who, read_bit, write_bit, exec_bit in identifiers:
+        # Start with no permissions
+        allowed_mask = 0
+        denied_mask = 0
+
+        # Evaluate ACL in order, considering only ALLOW/DENY for this
+        # identifier and EVERYONE@
+        for ace in acl:
+            # Skip non-relevant ACEs
+            if ace.who not in (who, b"EVERYONE@"):
+                continue
+            if ace.type not in (ALLOWED, DENIED):
+                continue
+            # Skip inherit-only ACEs (they don't affect current permissions)
+            if ace.flag & ACE4_INHERIT_ONLY_ACE:
+                continue
+
+            if ace.type == ALLOWED:
+                # Add allowed permissions not already denied
+                allowed_mask |= (ace.access_mask & ~denied_mask)
+            elif ace.type == DENIED:
+                # Add denied permissions not already allowed
+                denied_mask |= (ace.access_mask & ~allowed_mask)
+
+        # Translate permitted mask to mode bits per RFC 8881 Section 6.3.2
+        # Read bit: ACE4_READ_DATA must be set
+        if allowed_mask & ACE4_READ_DATA:
+            mode |= read_bit
+
+        # Write bit: BOTH ACE4_WRITE_DATA and ACE4_APPEND_DATA must be set
+        if (allowed_mask & ACE4_WRITE_DATA) and (allowed_mask & ACE4_APPEND_DATA):
+            mode |= write_bit
+
+        # Execute bit: ACE4_EXECUTE must be set
+        if allowed_mask & ACE4_EXECUTE:
+            mode |= exec_bit
+
+    return mode
+
+def access_mask_to_str(mask):
+    """Convert an ACE access_mask to a symbolic string representation"""
+    perms = [
+        (ACE4_READ_DATA, "READ_DATA"),
+        (ACE4_WRITE_DATA, "WRITE_DATA"),
+        (ACE4_APPEND_DATA, "APPEND_DATA"),
+        (ACE4_READ_NAMED_ATTRS, "READ_NAMED_ATTRS"),
+        (ACE4_WRITE_NAMED_ATTRS, "WRITE_NAMED_ATTRS"),
+        (ACE4_EXECUTE, "EXECUTE"),
+        (ACE4_DELETE_CHILD, "DELETE_CHILD"),
+        (ACE4_READ_ATTRIBUTES, "READ_ATTRIBUTES"),
+        (ACE4_WRITE_ATTRIBUTES, "WRITE_ATTRIBUTES"),
+        (ACE4_DELETE, "DELETE"),
+        (ACE4_READ_ACL, "READ_ACL"),
+        (ACE4_WRITE_ACL, "WRITE_ACL"),
+        (ACE4_WRITE_OWNER, "WRITE_OWNER"),
+        (ACE4_SYNCHRONIZE, "SYNCHRONIZE"),
+    ]
+    return " | ".join(name for bit, name in perms if mask & bit) or "(none)"
+
+def verify_acl(returned_acl, expected_acl):
+    """Verify that returned ACL contains expected ACEs
+
+    Server may insert additional ACEs anywhere, but the requested ones
+    must be present in the requested order, with the requested type,
+    principal, and flags, and with at least the requested permissions.
+
+    Raises AssertionError if verification fails.
+    """
+    if len(returned_acl) < len(expected_acl):
+        raise AssertionError(
+            "Returned ACL has fewer entries than requested: "
+            "expected at least %d, got %d" % (len(expected_acl), len(returned_acl)))
+
+    # Verify the ACEs we set are present (server may add additional ACEs)
+    pos = 0
+    for i, expected_ace in enumerate(expected_acl):
+        # RFC 8881 Section 6.2.1.4.1: ACE4_IDENTIFIER_GROUP is ignored on
+        # the special identifiers
+        flag_mask = ~0
+        if expected_ace.who.endswith(b"@"):
+            flag_mask = ~ACE4_IDENTIFIER_GROUP
+        expected_flag = expected_ace.flag & flag_mask
+        # A server may split one principal's grant across several ACEs,
+        # so keep searching past a candidate whose mask falls short and
+        # remember it for the error message
+        candidate = None
+        for j in range(pos, len(returned_acl)):
+            returned_ace = returned_acl[j]
+            if (returned_ace.type != expected_ace.type or
+                returned_ace.who != expected_ace.who or
+                (returned_ace.flag & flag_mask) != expected_flag):
+                continue
+            candidate = returned_ace
+            # Check that requested permissions are present (server may add more)
+            if (returned_ace.access_mask & expected_ace.access_mask) == expected_ace.access_mask:
+                break
+        else:
+            if candidate is None:
+                raise AssertionError(
+                    "ACE %d (type %d, flag 0x%x, who %s) not found in returned ACL" %
+                    (i, expected_ace.type, expected_ace.flag, expected_ace.who))
+            returned_ace = candidate
+            missing = expected_ace.access_mask & ~returned_ace.access_mask
+            raise AssertionError(
+                "ACE %d access_mask mismatch:\n"
+                "  Expected: %s\n"
+                "  Got:      %s\n"
+                "  Missing:  %s" %
+                (i,
+                 access_mask_to_str(expected_ace.access_mask),
+                 access_mask_to_str(returned_ace.access_mask),
+                 access_mask_to_str(missing)))
+        pos = j + 1
+
+def verify_mode_and_acl(attrs_dict, expected_acl, operation="operation"):
+    """Verify that MODE and ACL attributes match expectations
+
+    This helper encapsulates the common pattern of verifying both ACL
+    and mode derivation per RFC 8881 Section 6.3.2.
+
+    Args:
+        attrs_dict: Dictionary of attributes (must contain FATTR4_ACL and FATTR4_MODE)
+        expected_acl: The ACL that should be present
+        operation: Name of operation for error messages (default: "operation")
+
+    Raises:
+        AssertionError: If verification fails
+    """
+    # Check that both attributes are present
+    if FATTR4_ACL not in attrs_dict:
+        raise AssertionError(
+            "ACL attribute not returned after %s" % operation)
+    if FATTR4_MODE not in attrs_dict:
+        raise AssertionError(
+            "MODE attribute not returned after %s" % operation)
+
+    # Verify ACL matches expected
+    verify_acl(attrs_dict[FATTR4_ACL], expected_acl)
+
+    # Verify mode matches RFC 8881 derivation from the requested ACL.
+    # Deriving from the returned ACL would only check that the server
+    # agrees with itself, so a server that widened both would pass.
+    returned_mode = attrs_dict[FATTR4_MODE] & 0o777
+    expected_mode = acl2mode_rfc8881(expected_acl)
+
+    if returned_mode != expected_mode:
+        raise AssertionError(
+            "MODE (0%o) does not match RFC 8881 Section 6.3.2 derivation "
+            "from requested ACL (expected 0%o)" % (returned_mode, expected_mode))
 
 def printableacl(acl):
     type_str = ["ACCESS", "DENY"]

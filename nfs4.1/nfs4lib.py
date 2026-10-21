@@ -564,6 +564,14 @@ def attr_name(bitnum):
     """Returns string corresponding to attr bitnum"""
     return bitnum2attr.get(bitnum, "unknown_%r" % bitnum)
 
+def attr_bitmap_to_str(bitmap):
+    """Convert an attribute bitmap to a symbolic string representation"""
+    bits = bitmap2list(bitmap)
+    if not bits:
+        return "(none)"
+    names = [bitnum2attr.get(bit, "unknown_%d" % bit).upper() for bit in bits]
+    return ", ".join(names)
+
 class NFS4Error(Exception):
     def __init__(self, status, attrs=0, lock_denied=None, tag=None, check_msg=None):
         self.status = status
