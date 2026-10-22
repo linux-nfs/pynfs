@@ -21,7 +21,7 @@ from nfs4commoncode import CompoundState, encode_status, encode_status_by_name
 from fs import RootFS, ConfigFS
 from config import ServerConfig, ServerPerClientConfig, OpsConfigServer, Actions
 
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.WARN,
                     format="%(levelname)-7s:%(name)s:%(message)s")
 log_41 = logging.getLogger("nfs.server")
 
