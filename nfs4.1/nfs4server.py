@@ -1512,17 +1512,20 @@ class NFS4Server(rpc.Server):
             else:
                 base = obj
             name = "fattr4_%s" % nfs4lib.attr_name(attr)
-            if hasattr(base, name) and (obj.fs.fattr4_supported_attrs & 1<<attr): # STUB we should be able to remove hasattr
-                ret_dict[attr] = getattr(base, name)
-            else:
-                if ignore:
-                    # Must ignore for GETATTR (and READDIR) per 15.1
-                    log_41.info("ignored attr %s" % (name,))
+            if obj.fs.fattr4_supported_attrs & 1<<attr:
+                try: # STUB we should be able to rely on supported_attrs alone
+                    ret_dict[attr] = getattr(base, name)
                     continue
-                else:
-                    # This is for VERIFY/NVERIFY
-                    log_41.info("attr NOT SUPP %s" % (name,))
-                    raise NFS4Error(NFS4ERR_ATTRNOTSUPP)
+                except AttributeError:
+                    pass
+            if ignore:
+                # Must ignore for GETATTR (and READDIR) per 15.1
+                log_41.info("ignored attr %s" % (name,))
+                continue
+            else:
+                # This is for VERIFY/NVERIFY
+                log_41.info("attr NOT SUPP %s" % (name,))
+                raise NFS4Error(NFS4ERR_ATTRNOTSUPP)
         obj.fattr4_rdattr_error = NFS4_OK # XXX STUB Handle correctly
         return ret_dict
 
