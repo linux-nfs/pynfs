@@ -995,7 +995,7 @@ class NFS4Server(rpc.Server):
         size = protect.context.ssv_len
         if len(arg.ssa_ssv) != size:
             return encode_status(NFS4ERR_INVAL, msg=b"SSV size != %i" % size)
-        if arg.ssa_ssv == "\0" * size:
+        if arg.ssa_ssv == b"\0" * size:
             return encode_status(NFS4ERR_INVAL, msg=b"SSV==0 not allowed")
         # Now we need to compute and check digest, using SEQUENCE args
         p = nfs4lib.FancyNFS4Packer()
