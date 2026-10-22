@@ -376,6 +376,7 @@ class SessionRecord(object):
         #self.ssv = None # crypto hash for securing channel binding
         #            short for "Secret Session Verifier"
         self.cb_prog = None # callback rpc program number
+        self.minorversion = 1 # set from the CREATE_SESSION compound
         # NOTE 2.10.6.3 implies multiple principals can use a session
         # but 2.4 implies principal linked with ownerid (ie client)
 
@@ -954,6 +955,7 @@ class NFS4Server(rpc.Server):
         # Bind connection
         channel.connections.append(connection)
         session.cb_prog = arg.csa_cb_program
+        session.minorversion = env.minorversion
         # STUB - setting flags
         # Establish backchannel if the client asked for one
         flags = 0
@@ -1997,7 +1999,8 @@ class NFS4Server(rpc.Server):
     def fsid2fs(self, fsid):
         return self._fsids[fsid]
 
-    def cb_compound_async(self, args, prog, credinfo=None, pipe=None, tag=None):
+    def cb_compound_async(self, args, prog, credinfo=None, pipe=None, tag=None,
+                          minorversion=1):
         if tag is None:
             tag = b"Default callback tag"
         if pipe is None:
@@ -2006,7 +2009,7 @@ class NFS4Server(rpc.Server):
         if credinfo is None:
             credinfo = self.default_cred
         p = nfs4lib.FancyNFS4Packer()
-        c4 = CB_COMPOUND4args(tag, 1, 0, args)
+        c4 = CB_COMPOUND4args(tag, minorversion, 0, args)
         log_41.info("*" * 40)
         log_41.info("Sending CB_COMPOUND")
         log_41.info(repr(c4))

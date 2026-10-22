@@ -149,6 +149,7 @@ class %(CompoundState)s(object):
 
         # Access to args, since operations sometimes need access to others
         self.req_size = args.req_size
+        self.minorversion = args.minorversion
         self.argarray = args.argarray
         self.index = -1
         self.cred = cred # XXX pull out needed info?

@@ -762,7 +762,8 @@ class DelegEntry(StateTableEntry):
         # All sorts of STUBBINESS here
         pipe = session.channel_back.connections[0]
         xid = dispatcher.cb_compound_async([seq_op, recall_op],
-                                           session.cb_prog, pipe=pipe)
+                                           session.cb_prog, pipe=pipe,
+                                           minorversion=session.minorversion)
         # Note it is possible that self.invalid is True, but don't
         # want to take the lock
         self.status = CB_SENT
