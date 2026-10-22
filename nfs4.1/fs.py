@@ -984,8 +984,13 @@ class StubFS_Disk(FileSystem):
         if not os.path.isdir(path):
             raise RuntimeError("Path doesn't exist, try using '--reset' option")
         # Ensure persistent fs data exists there
-        d = self._fs_data = shelve.Shelf(_dbm.open(self._dbpath(path),
-                                                   "w")) # w needed for later allocation
+        try:
+            db = _dbm.open(self._dbpath(path), "w") # w needed for later allocation
+        except _dbm.error as e:
+            raise RuntimeError("Cannot open fs_info with %s (%s), "
+                               "try using '--reset' option"
+                               % (_dbm.__name__, e))
+        d = self._fs_data = shelve.Shelf(db)
         # Do __init__ portion that is needed
         self.objclass = FSObject
         self._disk_lock = Lock("FSLock(Disk)")
