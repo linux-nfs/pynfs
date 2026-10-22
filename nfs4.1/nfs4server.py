@@ -27,14 +27,6 @@ log_41 = logging.getLogger("nfs.server")
 
 log_cfg = logging.getLogger("nfs.server.opconfig")
 
-def _hasattr(obj, attr):
-    try:
-        getattr(obj, attr)
-        return True
-    except:
-        pass
-    return False
-
 ##################################################
 # Set various global constants and magic numbers #
 ##################################################
@@ -1518,7 +1510,7 @@ class NFS4Server(rpc.Server):
             else:
                 base = obj
             name = "fattr4_%s" % nfs4lib.attr_name(attr)
-            if _hasattr(base, name) and (obj.fs.fattr4_supported_attrs & 1<<attr): # STUB we should be able to remove hasattr
+            if hasattr(base, name) and (obj.fs.fattr4_supported_attrs & 1<<attr): # STUB we should be able to remove hasattr
                 ret_dict[attr] = getattr(base, name)
             else:
                 if ignore:
