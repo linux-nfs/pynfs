@@ -1697,7 +1697,8 @@ class NFS4Server(rpc.Server):
         check_session(env)
         check_cfh(env)
         if env.cfh.fattr4_type != NF4LNK:
-            return encode_status(NFS4_INVAL, msg=b"cfh type was %i" % i)
+            return encode_status(NFS4ERR_INVAL,
+                                 msg=b"cfh type was %i" % env.cfh.fattr4_type)
         res = READLINK4resok(env.cfh.linkdata)
         return encode_status(NFS4_OK, res)
 
@@ -1898,10 +1899,10 @@ class NFS4Server(rpc.Server):
             check_session(env)
             check_cfh(env)
             if arg.loga_length == 0:
-                return encode_status(NFS4_INVAL, msg=b"length == 0")
+                return encode_status(NFS4ERR_INVAL, msg=b"length == 0")
             if arg.loga_length != 0xffffffffffffffff:
                 if arg.loga_length + arg.loga_offset > 0xffffffffffffffff:
-                     return encode_status(NFS4_INVAL, msg=b"offset+length too big")
+                     return encode_status(NFS4ERR_INVAL, msg=b"offset+length too big")
             if not env.session.has_backchannel:
                 raise NFS4Error(NFS4ERR_LAYOUTTRYLATER)
             # STUB do state locking and check on iomode,offset,length triple
