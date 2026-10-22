@@ -255,7 +255,7 @@ class DataServer3(DataServer):
         # XXX clean DS directory
 
     def open_file(self, mds_fh):
-        name = self.fh_to_name(mds_fh)
+        name = self.fh_to_name(mds_fh).encode("utf-8")
         where = type3.diropargs3(self.rootfh, name)
         attr = type3.sattr3(mode=type3.set_mode3(True, 0o777),
                             uid=type3.set_uid3(True, 0),
