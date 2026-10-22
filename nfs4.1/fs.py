@@ -86,7 +86,7 @@ class FSObject(object):
             else:
                 # Pad with zeroes
                 self.file.seek(0, 2)
-                self.file.write(chr(0) * (value - size))
+                self.file.write(b"\0" * (value - size))
             self.change_data()
         else:
             raise NFS4Error(NFS4ERR_INVAL)
