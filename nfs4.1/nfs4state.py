@@ -147,6 +147,8 @@ class DictTree(object):
         """Is any state being held?"""
         return bool(self._data)
 
+    __bool__ = __nonzero__
+
     def __getitem__(self, key):
         if len(key) != self._depth:
             raise KeyError("Wrong key length %i" % len(key))
@@ -296,7 +298,6 @@ class DelegState(FileStateTyped):
                 return False
             else:
                 return True
-            break
 
     def recall_conflicting_delegations(self, dispatcher, client, access, deny):
         # NOTE OK to have extra access/deny flags
