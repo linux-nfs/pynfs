@@ -64,7 +64,7 @@ class NFSops:
                     arg = klass(*args)
 
                 if enum_name.startswith("CB_"):
-                    kwargs['opcb%s' % enum_name.lower()] = arg
+                    kwargs['opcb%s' % enum_name[3:].lower()] = arg
                 else:
                     kwargs['op%s' % enum_name.lower()] = arg
 
