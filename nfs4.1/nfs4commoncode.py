@@ -121,7 +121,7 @@ class %(PairedResults)s(object):
     def set_empty_return(self, status, tag=None):
         self.reply.status = self.cache.status = status
         if tag is not None:
-            self.env.tag = tag
+            self.env.tag_msg(tag)
 
     # Generally make class behave like self.reply
     def __getitem__(self, key):
@@ -162,6 +162,8 @@ class %(CompoundState)s(object):
 
     def tag_msg(self, msg):
         # STUB - put some sort of check here to enable/disable this funct
+        if isinstance(msg, str):
+            msg = msg.encode()
         self.tag = msg
 
     def get_principal(self, cred):
