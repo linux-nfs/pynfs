@@ -1999,7 +1999,7 @@ class NFS4Server(rpc.Server):
 
     def cb_compound_async(self, args, prog, credinfo=None, pipe=None, tag=None):
         if tag is None:
-            tag = "Default callback tag"
+            tag = b"Default callback tag"
         if pipe is None:
             # BUG
             raise RuntimeError
