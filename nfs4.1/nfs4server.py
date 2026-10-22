@@ -1364,7 +1364,7 @@ class NFS4Server(rpc.Server):
         if claim_type != CLAIM_NULL and arg.openhow.opentype == OPEN4_CREATE:
             return encode_status(NFS4ERR_INVAL,
                                  msg=b"OPEN4_CREATE not compatible with %s" %
-                                 open_claim_type4[claim_type])
+                                 open_claim_type4[claim_type].encode())
         # emulate switch(claim_type)
         try:
             func = getattr(self,
