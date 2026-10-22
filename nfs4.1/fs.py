@@ -932,11 +932,17 @@ class ConfigFS(FileSystem):
 ###################################################
 
 import os
-import sys
 import pickle
 import shutil
 import shelve
-import dbm.gnu as gdbm
+try:
+    # gdbm is thread-agnostic; the sqlite3 backend that dbm.open()
+    # prefers on Python 3.13+ refuses use from any thread but the
+    # one that opened it, and the server serves each client from
+    # its own thread.
+    import dbm.gnu as _dbm
+except ImportError:
+    import dbm.dumb as _dbm
 
 class StubFS_Disk(FileSystem):
     _fs_data_name = b"fs_info" # DB name where we store persistent data
@@ -951,14 +957,9 @@ class StubFS_Disk(FileSystem):
         # XXX Note shelve DB is still open
 
     def _dbpath(self, path):
-        """
-        generate proper dbpath format according python version.
-        see: https://docs.python.org/3.13/library/dbm.html#module-dbm.gnu
-        """
-        dbpath = os.path.join(path, self._fs_data_name)
-        if sys.version_info < (3, 11):
-            dbpath = dbpath.decode("utf-8")
-        return dbpath
+        """Return the database path as str, which dbm.gnu.open() requires
+        on Python versions before 3.11."""
+        return os.fsdecode(os.path.join(path, self._fs_data_name))
 
     def _reset(self, path, fsid):
         """Create an empty fs, overwriting all existing data."""
@@ -971,8 +972,7 @@ class StubFS_Disk(FileSystem):
         shutil.rmtree(path)
         os.makedirs(path)
         # This needs to be open before calling __init__
-        db = gdbm.open(self._dbpath(path), "n")
-        d = self._fs_data = shelve.Shelf(db)
+        d = self._fs_data = shelve.Shelf(_dbm.open(self._dbpath(path), "n"))
         d["_nextid"] = self._nextid
         # normal __init__
         FileSystem.__init__(self)
@@ -992,8 +992,8 @@ class StubFS_Disk(FileSystem):
         if not os.path.isdir(path):
             raise RuntimeError("Path doesn't exist, try using '--reset' option")
         # Ensure persistent fs data exists there
-        db = gdbm.open(self._dbpath(path), "w") # w needed for later allocation
-        d = self._fs_data = shelve.Shelf(db)
+        d = self._fs_data = shelve.Shelf(_dbm.open(self._dbpath(path),
+                                                   "w")) # w needed for later allocation
         # Do __init__ portion that is needed
         self.objclass = FSObject
         self._disk_lock = Lock("FSLock(Disk)")
