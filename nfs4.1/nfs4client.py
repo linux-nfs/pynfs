@@ -211,7 +211,7 @@ class NFS4Client(rpc.Client, rpc.Server):
                 except NFS4Replay:
                     # Just pass this on up
                     raise
-                except StandardError:
+                except Exception:
                     # Uh-oh.  This is a server bug
                     traceback.print_exc()
                     result = encode_status_by_name(opname.lower()[3:],
