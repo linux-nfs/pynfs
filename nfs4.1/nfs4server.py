@@ -835,10 +835,10 @@ class NFS4Server(rpc.Server):
                     # catch error themselves to encode properly.
                     result = encode_status_by_name(opname.lower()[3:],
                                                    e.status, msg=e.tag)
-                except NFS4Replay as e:
+                except NFS4Replay:
                     # Just pass this on up
                     raise
-                except Exception as e:
+                except Exception:
                     # Uh-oh.  This is a server bug
                     traceback.print_exc()
                     result = encode_status_by_name(opname.lower()[3:],
