@@ -718,12 +718,12 @@ class ConfigObj(FSObject):
 
     def _reset(self):
         self.file = BytesIO()
-        self.file.write("# %s\n" % self.configline.comment)
+        self.file.write(("# %s\n" % self.configline.comment).encode())
         value = self.configline.value
         if type(value) is list:
-            self.file.write(" ".join([str(i) for i in value]))
+            self.file.write(" ".join([str(i) for i in value]).encode())
         else:
-            self.file.write("%r\n" % value)
+            self.file.write(("%r\n" % value).encode())
         self.change_data()
         self.dirty = False
 
@@ -747,7 +747,7 @@ class ConfigObj(FSObject):
         if not self.dirty:
             return
         lines = []
-        for line in self.file.getvalue().split("\n"):
+        for line in self.file.getvalue().decode(errors="replace").split("\n"):
             line = line.strip()
             if line and not line.startswith("#"):
                 lines.append(line)
