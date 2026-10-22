@@ -1740,7 +1740,6 @@ class NFS4Server(rpc.Server):
         if not nfs4lib.test_equal(env.sfh.fattr4_fsid, env.cfh.fattr4_fsid,
                                   kind="fsid4"):
             return encode_status(NFS4ERR_XDEV, msg=b"%r != %r" % (env.sfh.fattr4_fsid, env.cfh.fattr4_fsid))
-        order = sorted(set([env.cfh, env.sfh])) # Used to prevent locking problems
         # BUG fs locking
         old_change_src = env.sfh.fattr4_change
         old_change_dst = env.cfh.fattr4_change
