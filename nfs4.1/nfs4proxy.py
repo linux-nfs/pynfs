@@ -60,7 +60,7 @@ class NFS4Proxy(rpc.Server):
             return (min(self.cb_versions), max(self.cb_versions))
 
         def _find_method(self, msg):
-            method = getattr(self.proxy, b'handle_cb_%i' % msg.proc, None)
+            method = getattr(self.proxy, 'handle_cb_%i' % msg.proc, None)
             if method is not None:
                 return method
             return None
@@ -192,7 +192,7 @@ class NFS4Proxy(rpc.Server):
             env = CompoundState(args, cred)
         for arg in args.argarray:
             env.index += 1
-            opname = nfs_opnum4.get(arg.argop, b'op_illegal')
+            opname = nfs_opnum4.get(arg.argop, 'op_illegal')
             log.info("*** %s (%d) ***" % (opname, arg.argop))
             # look for functions implemented by the proxy
             # that override communication
