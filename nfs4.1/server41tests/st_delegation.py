@@ -644,6 +644,12 @@ def testCbGetattrAfterSyncWrite(t, env):
     #print(f"attrs3: size {attrs3[FATTR4_SIZE]} change {attrs3[FATTR4_CHANGE]} mtime {attrs3[FATTR4_TIME_MODIFY]}")
     #print(f"attrs4: size {attrs4[FATTR4_SIZE]} change {attrs4[FATTR4_CHANGE]} mtime {attrs4[FATTR4_TIME_MODIFY]}")
 
+    if compareTimes(attrs1[FATTR4_TIME_MODIFY], attrs2[FATTR4_TIME_MODIFY]) == 0:
+        fail(f"mtime before write ({attrs1[FATTR4_TIME_MODIFY]}) == "
+             f"mtime after write ({attrs2[FATTR4_TIME_MODIFY]})")
+    if compareTimes(attrs2[FATTR4_TIME_MODIFY], attrs3[FATTR4_TIME_MODIFY]) != 0:
+        fail(f"mtime after write ({attrs2[FATTR4_TIME_MODIFY]}) != "
+             f"mtime seen by second client ({attrs3[FATTR4_TIME_MODIFY]})")
     if compareTimes(attrs2[FATTR4_TIME_MODIFY], attrs4[FATTR4_TIME_MODIFY]) != 0:
         fail(f"mtime after write ({attrs2[FATTR4_TIME_MODIFY]}) != "
              f"mtime from delegreturn ({attrs4[FATTR4_TIME_MODIFY]})")
