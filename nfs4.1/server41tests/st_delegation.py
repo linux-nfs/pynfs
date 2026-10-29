@@ -394,11 +394,12 @@ def _testCbGetattr(t, env, change=0, size=0):
     # wait for the CB_GETATTR
     completed = cb.wait(2)
     res = sess2.listen(slot)
-    attrs2 = res.resarray[-1].obj_attributes
-    sess1.compound([op.putfh(fh), op.delegreturn(deleg.write.stateid)])
-    check(res, [NFS4_OK, NFS4ERR_DELAY])
+    res2 = sess1.compound([op.putfh(fh), op.delegreturn(deleg.write.stateid)])
+    check(res2)
     if not completed:
         fail("CB_GETATTR not received")
+    check(res)
+    attrs2 = res.resarray[-1].obj_attributes
     res = close_file(sess1, fh, stateid=stateid)
     check(res)
     return attrs1, attrs2
