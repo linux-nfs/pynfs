@@ -386,6 +386,12 @@ def _testCbGetattr(t, env, change=0, size=0):
             cbattrs[FATTR4_TIME_DELEG_ACCESS].seconds += 1
             cbattrs[FATTR4_TIME_DELEG_MODIFY].seconds += 1
 
+    # When the CB_GETATTR reply reports a change, a server that holds
+    # no delegated timestamps sets time_modify from its own clock.
+    # Move that clock past the value in attrs1 first.
+    if change != 0:
+        env.sleep(1)
+
     # create a new client session and do a GETATTR
     sess2 = env.c1.new_client_session(b"%s_2" % env.testname(t))
     slot = sess2.compound_async([op.putfh(fh), op.getattr(1<<FATTR4_CHANGE | 1<<FATTR4_SIZE |
