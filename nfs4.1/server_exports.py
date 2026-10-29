@@ -4,22 +4,22 @@ from dataserver import DSDevice
 def mount_stuff(server, opts):
     """Mount some filesystems to the server"""
     # STUB - just testing stuff out
-    A = StubFS_Disk("/tmp/py41/fs1", opts.reset, 1)
+    A = StubFS_Disk(b"/tmp/py41/fs1", opts.reset, 1)
     B = StubFS_Mem(2)
     C = StubFS_Mem(3)
-    server.mount(A, path="/a")
-    server.mount(B, path="/b")
-    server.mount(C, path="/foo/bar/c")
+    server.mount(A, path=b"/a")
+    server.mount(B, path=b"/b")
+    server.mount(C, path=b"/foo/bar/c")
     if opts.use_block:
         dev = _create_simple_block_dev()
         E = BlockLayoutFS(5, backing_device=dev)
-        server.mount(E, path="/block")
+        server.mount(E, path=b"/block")
     if opts.use_files:
         dservers = _load_dataservers(opts.dataservers, server)
         if dservers is None:
             return
         F = FileLayoutFS(6, dservers)
-        server.mount(F, path="/files")
+        server.mount(F, path=b"/files")
 
 def _create_simple_block_dev():
     from block import Simple, Slice, Concat, Stripe, BlockVolume

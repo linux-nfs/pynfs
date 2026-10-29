@@ -6,10 +6,7 @@ from nfs4lib import NFS4Error
 import struct
 import logging
 from locking import Lock, RWLock
-try:
-    import cStringIO.StringIO as StringIO
-except:
-    from io import StringIO
+from io import BytesIO
 import time
 from xdrdef.nfs4_pack import NFS4Packer
 
@@ -89,7 +86,7 @@ class FSObject(object):
             else:
                 # Pad with zeroes
                 self.file.seek(0, 2)
-                self.file.write(chr(0) * (value - size))
+                self.file.write(b"\0" * (value - size))
             self.change_data()
         else:
             raise NFS4Error(NFS4ERR_INVAL)
@@ -182,7 +179,7 @@ class FSObject(object):
 
     def init_file(self):
         """Hook for subclasses that want to use their own file class"""
-        return StringIO()
+        return BytesIO()
 
     def _init_hook(self):
         pass
@@ -320,6 +317,7 @@ class FSObject(object):
                                     tag = "attr %i not writable" % attr)
                 name = "fattr4_%s" % nfs4lib.attr_name(attr)
                 # Note all writable attrs are object attrs
+
                 if hasattr(self, name):
                     base = self
                 else:
@@ -711,13 +709,13 @@ class ConfigObj(FSObject):
         self._reset()
 
     def _reset(self):
-        self.file = StringIO()
-        self.file.write("# %s\n" % self.configline.comment)
+        self.file = BytesIO()
+        self.file.write(("# %s\n" % self.configline.comment).encode())
         value = self.configline.value
         if type(value) is list:
-            self.file.write(" ".join([str(i) for i in value]))
+            self.file.write(" ".join([str(i) for i in value]).encode())
         else:
-            self.file.write("%r\n" % value)
+            self.file.write(("%r\n" % value).encode())
         self.change_data()
         self.dirty = False
 
@@ -741,7 +739,7 @@ class ConfigObj(FSObject):
         if not self.dirty:
             return
         lines = []
-        for line in self.file.getvalue().split("\n"):
+        for line in self.file.getvalue().decode(errors="replace").split("\n"):
             line = line.strip()
             if line and not line.startswith("#"):
                 lines.append(line)
@@ -929,9 +927,17 @@ import os
 import pickle
 import shutil
 import shelve
+try:
+    # gdbm is thread-agnostic; the sqlite3 backend that dbm.open()
+    # prefers on Python 3.13+ refuses use from any thread but the
+    # one that opened it, and the server serves each client from
+    # its own thread.
+    import dbm.gnu as _dbm
+except ImportError:
+    import dbm.dumb as _dbm
 
 class StubFS_Disk(FileSystem):
-    _fs_data_name = "fs_info" # DB name where we store persistent data
+    _fs_data_name = b"fs_info" # DB name where we store persistent data
     def __init__(self, path, reset=False, fsid=None):
         self._nextid = 0
         self.path = path
@@ -941,6 +947,11 @@ class StubFS_Disk(FileSystem):
         else:
             self._init(path)
         # XXX Note shelve DB is still open
+
+    def _dbpath(self, path):
+        """Return the database path as str, which dbm.gnu.open() requires
+        on Python versions before 3.11."""
+        return os.fsdecode(os.path.join(path, self._fs_data_name))
 
     def _reset(self, path, fsid):
         """Create an empty fs, overwriting all existing data."""
@@ -953,8 +964,7 @@ class StubFS_Disk(FileSystem):
         shutil.rmtree(path)
         os.makedirs(path)
         # This needs to be open before calling __init__
-        d = self._fs_data = shelve.open(os.path.join(path, self._fs_data_name),
-                                        "n")
+        d = self._fs_data = shelve.Shelf(_dbm.open(self._dbpath(path), "n"))
         d["_nextid"] = self._nextid
         # normal __init__
         FileSystem.__init__(self)
@@ -974,8 +984,13 @@ class StubFS_Disk(FileSystem):
         if not os.path.isdir(path):
             raise RuntimeError("Path doesn't exist, try using '--reset' option")
         # Ensure persistent fs data exists there
-        d = self._fs_data = shelve.open(os.path.join(path, self._fs_data_name),
-                                        "w") # w needed for later allocation
+        try:
+            db = _dbm.open(self._dbpath(path), "w") # w needed for later allocation
+        except _dbm.error as e:
+            raise RuntimeError("Cannot open fs_info with %s (%s), "
+                               "try using '--reset' option"
+                               % (_dbm.__name__, e))
+        d = self._fs_data = shelve.Shelf(db)
         # Do __init__ portion that is needed
         self.objclass = FSObject
         self._disk_lock = Lock("FSLock(Disk)")
@@ -991,17 +1006,17 @@ class StubFS_Disk(FileSystem):
         self.root = self.find(d["root"])
 
     def find_on_disk(self, id):
-        fd = open(os.path.join(self.path, "m_%i" % id), "r")
+        fd = open(os.path.join(self.path, b"m_%i" % id), "rb")
         # BUG - need to trap for file not found error
         meta = pickle.load(fd)
         fd.close()
         obj = self.objclass(self, id, meta)
         if obj.type == NF4REG:
-            fd = open(os.path.join(self.path, "d_%i" % id), "r")
-            obj.file = StringIO(fd.read())
+            fd = open(os.path.join(self.path, b"d_%i" % id), "rb")
+            obj.file = BytesIO(fd.read())
             fd.close()
         elif obj.type == NF4DIR:
-            fd = open(os.path.join(self.path, "d_%i" % id), "r")
+            fd = open(os.path.join(self.path, b"d_%i" % id), "rb")
             obj.entries = pickle.load(fd)
             fd.close()
         return obj
@@ -1018,10 +1033,10 @@ class StubFS_Disk(FileSystem):
             self._fs_data["_nextid"] = id
             self._fs_data.sync()
             # Create meta-data file
-            fd = open(os.path.join(self.path, "m_%i" % id), "w")
+            fd = open(os.path.join(self.path, b"m_%i" % id), "wb")
             fd.close()
             # Create data file
-            # fd = open(os.path.join(self.path, "d_%i" % id), "w")
+            # fd = open(os.path.join(self.path, b"d_%i" % id), "wb")
             # fd.close()
         finally:
             self._disk_lock.release()
@@ -1032,11 +1047,11 @@ class StubFS_Disk(FileSystem):
         self._disk_lock.acquire()
         try:
             # Remove meta-data file
-            meta = os.path.join(self.path, "m_%i" % id)
+            meta = os.path.join(self.path, b"m_%i" % id)
             if os.path.isfile(meta):
                 os.remove(meta)
             # Remove data file
-            data = os.path.join(self.path, "d_%i" % id)
+            data = os.path.join(self.path, b"d_%i" % id)
             if os.path.isfile(data):
                 os.remove(data)
         finally:
@@ -1049,20 +1064,20 @@ class StubFS_Disk(FileSystem):
         try:
             # Create meta-data file
             log_fs.debug("writing metadata for id=%i" % id)
-            fd = open(os.path.join(self.path, "m_%i" % id), "w")
+            fd = open(os.path.join(self.path, b"m_%i" % id), "wb")
             log_fs.debug("%r" % obj.meta.__dict__)
             pickle.dump(obj.meta, fd)
             fd.close()
             if obj.type == NF4REG:
                 # Create data file
-                fd = open(os.path.join(self.path, "d_%i" % id), "w")
+                fd = open(os.path.join(self.path, b"d_%i" % id), "wb")
                 obj.file.seek(0)
                 fd.write(obj.file.read())
                 fd.close()
             elif obj.type == NF4DIR:
                 # Create dir entries
                 log_fs.debug("writing dir %r" % obj.entries.keys())
-                fd = open(os.path.join(self.path, "d_%i" % id), "w")
+                fd = open(os.path.join(self.path, b"d_%i" % id), "wb")
                 pickle.dump(obj.entries, fd)
                 fd.close()
         finally:
@@ -1408,7 +1423,7 @@ class FSLayoutFSObj(FSObject):
     def init_file(self):
         self.stripe_size = NFL4_UFLG_STRIPE_UNIT_SIZE_MASK & 0x4000
         if self.fs.dsdevice.mdsds:
-            return StringIO()
+            return BytesIO()
         else:
             return FileLayoutFile(self)
 
