@@ -67,7 +67,8 @@ def _testDeleg(t, env, openaccess, want, breakaccess, sec = None, sec2 = None):
     check(res, [NFS4_OK, NFS4ERR_DELAY])
     if not completed:
         fail("delegation break not received")
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
     return recall
 
 def testReadDeleg(t, env):
@@ -117,7 +118,8 @@ def testNoDeleg(t, env):
         fail("Got a delegation (type "+str(deleg.delegation_type)+") despite asking for none")
     if deleg.ond_why != WND4_NOT_WANTED:
         fail("Wrong reason ("+str(deleg.ond_why)+") for giving no delegation")
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
 
 
 def testCBSecParms(t, env):
@@ -231,9 +233,11 @@ def testDelegRevocation(t, env):
     if flags & ~SEQ4_STATUS_RECALLABLE_STATE_REVOKED:
         print("WARNING: unexpected status flag(s) 0x%x set" % flags)
 
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
     if fh2 is not None and stateid2 is not None:
-        close_file(sess2, fh2, stateid=stateid2)
+        res = close_file(sess2, fh2, stateid=stateid2)
+        check(res)
 
 def testWriteOpenvsReadDeleg(t, env):
     """Ensure that a write open prevents granting a read delegation
@@ -265,8 +269,10 @@ def testWriteOpenvsReadDeleg(t, env):
     if (_got_deleg(deleg)):
         fail("Granted delegation to a file write-opened by another client")
 
-    close_file(sess1, fh, stateid=stateid)
-    close_file(sess2, fh2, stateid=stateid2)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
+    res = close_file(sess2, fh2, stateid=stateid2)
+    check(res)
 
 def testServerSelfConflict3(t, env):
     """DELEGATION test
@@ -324,9 +330,11 @@ def testServerSelfConflict3(t, env):
     if not completed:
         fail("delegation break not received")
 
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
     if fh2 is not None and stateid2 is not None:
-        close_file(sess2, fh2, stateid=stateid2)
+        res = close_file(sess2, fh2, stateid=stateid2)
+        check(res)
 
 def _testCbGetattr(t, env, change=0, size=0):
     cb = threading.Event()
@@ -391,7 +399,8 @@ def _testCbGetattr(t, env, change=0, size=0):
     check(res, [NFS4_OK, NFS4ERR_DELAY])
     if not completed:
         fail("CB_GETATTR not received")
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
     return attrs1, attrs2
 
 def testCbGetattrNoChange(t, env):
@@ -617,9 +626,11 @@ def testCbGetattrAfterSyncWrite(t, env):
         fh2 = None
         stateid2 = None
 
-    close_file(sess1, fh, stateid=stateid)
+    res = close_file(sess1, fh, stateid=stateid)
+    check(res)
     if fh2 is not None and stateid2 is not None:
-        close_file(sess2, fh2, stateid=stateid2)
+        res = close_file(sess2, fh2, stateid=stateid2)
+        check(res)
 
     #print(f"attrs1: size {attrs1[FATTR4_SIZE]} change {attrs1[FATTR4_CHANGE]} mtime {attrs1[FATTR4_TIME_MODIFY]}")
     #print(f"attrs2: size {attrs2[FATTR4_SIZE]} change {attrs2[FATTR4_CHANGE]} mtime {attrs2[FATTR4_TIME_MODIFY]}")

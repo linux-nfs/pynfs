@@ -21,7 +21,8 @@ def testAllocateSupported(t, env):
     res = sess.compound([op.putfh(fh), op.allocate(stateid, 0, 1)])
     check(res)
 
-    close_file(sess, fh, stateid=stateid)
+    res = close_file(sess, fh, stateid=stateid)
+    check(res)
 
 def testAllocateStateidZero(t, env):
     """Do a simple ALLOCATE with all-zero stateid
@@ -38,7 +39,8 @@ def testAllocateStateidZero(t, env):
     res = sess.compound([op.putfh(fh), op.allocate(env.stateid0, 0, 1)])
     check(res)
 
-    close_file(sess, fh, stateid=stateid)
+    res = close_file(sess, fh, stateid=stateid)
+    check(res)
 
 def testAllocateStateidOne(t, env):
     """Do a simple ALLOCATE with all-one stateid
@@ -55,4 +57,5 @@ def testAllocateStateidOne(t, env):
     res = sess.compound([op.putfh(fh), op.allocate(env.stateid1, 0, 1)])
     check(res)
 
-    close_file(sess, fh, stateid=stateid)
+    res = close_file(sess, fh, stateid=stateid)
+    check(res)
