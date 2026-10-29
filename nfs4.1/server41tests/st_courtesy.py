@@ -84,6 +84,11 @@ def testLockSleepLock(t, env):
     res = sess2.compound(cour_lockargs(fh, stateid))
     check(res, NFS4_OK)
 
+    lock_stateid = res.resarray[-1].lock_stateid
+    lock_ops = [ op.locku(WRITE_LT, 0, lock_stateid, 0, NFS4_UINT64_MAX) ]
+    res = sess2.compound([op.putfh(fh)] + lock_ops)
+    check(res)
+
     res = close_file(sess2, fh, stateid=stateid)
     check(res)
 
