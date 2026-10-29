@@ -198,12 +198,8 @@ def testDelegRevocation(t, env):
         # depend on the above compound waiting no longer than the
         # server's lease period:
         res = sess1.compound([])
-    if res.status == NFS4_OK:
-        fh2 = res.resarray[-1].object
-        stateid2 = res.resarray[-2].stateid
-    else:
-        fh2 = None
-        stateid2 = None
+    fh2 = res.resarray[-1].object
+    stateid2 = res.resarray[-2].stateid
     res = sess1.compound([op.putfh(fh), op.read(delegstateid, 0, 1000)])
     check(res, NFS4ERR_DELEG_REVOKED, "Read with a revoked delegation")
     slot, seq_op = sess1._prepare_compound({})
@@ -235,9 +231,8 @@ def testDelegRevocation(t, env):
 
     res = close_file(sess1, fh, stateid=stateid)
     check(res)
-    if fh2 is not None and stateid2 is not None:
-        res = close_file(sess2, fh2, stateid=stateid2)
-        check(res)
+    res = close_file(sess2, fh2, stateid=stateid2)
+    check(res)
 
 def testWriteOpenvsReadDeleg(t, env):
     """Ensure that a write open prevents granting a read delegation
