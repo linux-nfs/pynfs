@@ -23,7 +23,9 @@ def __create_file_with_deleg(sess, name, access):
     deleg = res.resarray[-2].delegation
     if (not _got_deleg(deleg)):
         res = open_file(sess, name, access = access)
+        check(res)
         fh = res.resarray[-1].object
+        stateid = res.resarray[-2].stateid
         deleg = res.resarray[-2].delegation
         if (not _got_deleg(deleg)):
             fail("Could not get delegation")
