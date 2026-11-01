@@ -613,17 +613,23 @@ def testCbGetattrAfterSyncWrite(t, env):
     env.sleep(.1)
 
     # Note if we have a write attrs deleg we should do a setattr before the
-    # delegreturn (see RFC 9754, section 5)
-    res = sess1.compound([op.putfh(fh),
-                          *([op.setattr(delegstateid,
-                                        {FATTR4_TIME_DELEG_ACCESS: cbattrs[FATTR4_TIME_DELEG_ACCESS],
-                                         FATTR4_TIME_DELEG_MODIFY: cbattrs[FATTR4_TIME_DELEG_MODIFY]})]
-                              if delegtype == OPEN_DELEGATE_WRITE_ATTRS_DELEG else []),
-                          op.getattr(1<<FATTR4_CHANGE |
-                                     1<<FATTR4_SIZE |
-                                     1<<FATTR4_TIME_ACCESS |
-                                     1<<FATTR4_TIME_MODIFY),
-                          op.delegreturn(delegstateid)])
+    # delegreturn (see RFC 9754, section 5).  The server may reject the
+    # proxied times with NFS4ERR_DELAY, so retry a few times.
+    ops = [op.putfh(fh),
+           *([op.setattr(delegstateid,
+                         {FATTR4_TIME_DELEG_ACCESS: cbattrs[FATTR4_TIME_DELEG_ACCESS],
+                          FATTR4_TIME_DELEG_MODIFY: cbattrs[FATTR4_TIME_DELEG_MODIFY]})]
+               if delegtype == OPEN_DELEGATE_WRITE_ATTRS_DELEG else []),
+           op.getattr(1<<FATTR4_CHANGE |
+                      1<<FATTR4_SIZE |
+                      1<<FATTR4_TIME_ACCESS |
+                      1<<FATTR4_TIME_MODIFY),
+           op.delegreturn(delegstateid)]
+    for i in range(5):
+        res = sess1.compound(ops)
+        if res.status != NFS4ERR_DELAY:
+            break
+        env.sleep(1)
     check(res)
     attrs4 = res.resarray[-2].obj_attributes
 
