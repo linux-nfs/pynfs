@@ -139,6 +139,7 @@ def _getDirDeleg(t, env, notify_mask, cb):
         t.fail("Server returned unknown non-fatal status code.")
 
     deleg = res.resarray[-1].gddrnf_resok4.gddr_stateid
+    cb.granted = nf.gddrnf_resok4.gddr_notification
     if NOTIFY4_GFLAG_EXTEND in notify_mask and \
        nf.gddrnf_resok4.gddr_notification != mask_bm:
         ops = [ op.putfh(fh), op.delegreturn(deleg) ]
@@ -345,7 +346,7 @@ def testDirDelegLinkRecall(t, env):
     _reap_async(sess2, slot, completed)
 
 def testDirDelegNoGflag(t, env):
-    """Verify recall instead of notification without NOTIFY4_GFLAG_EXTEND
+    """Verify notification or recall matches the grant without NOTIFY4_GFLAG_EXTEND
 
     FLAGS: dirdeleg all
     CODE: DIRDELEG7
@@ -376,8 +377,14 @@ def testDirDelegNoGflag(t, env):
         file_fh = res.resarray[-1].object
         close_file(sess2, file_fh, stateid=open_stateid)
 
+    # A server that granted ADD_ENTRY notifications to an order-aware
+    # client must deliver them.  One that declined them must recall.
+    if NOTIFY4_ADD_ENTRY in nfs4lib.bitmap2list(cb.granted):
+        if not cb.got_notify:
+            fail("Server granted ADD_ENTRY notifications but sent no CB_NOTIFY")
+        return
     if cb.got_notify:
-        fail("Got CB_NOTIFY without GFLAG_EXTEND")
+        fail("Got CB_NOTIFY for a notification the server did not grant")
     if not cb.got_recall:
         fail("Expected CB_RECALL without GFLAG_EXTEND, but didn't get one")
 
