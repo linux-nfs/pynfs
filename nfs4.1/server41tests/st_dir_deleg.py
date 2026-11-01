@@ -3,6 +3,7 @@ from .st_open import open_claim4
 from xdrdef.nfs4_const import *
 
 from .environment import check, fail, create_obj, use_obj, close_file, rename_obj
+from .environment import open_create_file_op, create_confirm, create_close
 from xdrdef.nfs4_type import *
 import nfs_ops
 op = nfs_ops.NFS4ops()
@@ -59,6 +60,27 @@ def _reap_async(sess, slot, completed):
         fail("Expected callback not received")
     check(res, [NFS4_OK, NFS4ERR_DELAY])
     return res
+
+# Every test creates its files the same way: an empty regular file,
+# opened for write with no delegation wanted.
+_create_attrs = {FATTR4_SIZE: 0}
+_create_access = OPEN4_SHARE_ACCESS_WRITE
+
+def _create_ops(sess, path, owner=b"owner"):
+    """Build the OPEN(CREATE)/GETFH compound for a regular file at path."""
+    return open_create_file_op(sess, owner, path, attrs=_create_attrs,
+                               access=_create_access, open_create=OPEN4_CREATE)
+
+def _create_open(sess, path, owner=b"owner"):
+    """Create a regular file at path; return (open stateid, filehandle)."""
+    fh, stateid = create_confirm(sess, owner, path, attrs=_create_attrs,
+                                 access=_create_access)
+    return stateid, fh
+
+def _create_close(sess, path, owner=b"owner"):
+    """Create a regular file at path and close it; return its filehandle."""
+    return create_close(sess, owner, path, attrs=_create_attrs,
+                        access=_create_access)
 
 def _getDirDeleg(t, env, notify_mask, cb):
     def recall_pre_hook(arg, env):
@@ -155,18 +177,13 @@ def testDirDelegSimple(t, env):
     CODE: DIRDELEG1
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     recall = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
 
     # new client -- create a file in the dir
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    slot = sess2.compound_async(open_op)
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
     completed = recall.wait(2)
     env.sleep(.1)
 
@@ -214,21 +231,12 @@ def testDirDelegRemoveRecall(t, env):
     CODE: DIRDELEG3
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     recall = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
 
     # Create a file from sess1
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     # Remove the file from sess2 -- should trigger recall
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
@@ -250,20 +258,12 @@ def testDirDelegRenameRecall(t, env):
     CODE: DIRDELEG4
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     recall = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
 
     # Create a file from sess1
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess1, topdir + [env.testname(t)])
 
     # Rename the file from sess2 -- should trigger recall
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
@@ -314,21 +314,12 @@ def testDirDelegLinkRecall(t, env):
     CODE: DIRDELEG6
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     recall = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
 
     # Create a file from sess1
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     # Link the file to a new name from sess2 -- should trigger recall
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
@@ -352,17 +343,12 @@ def testDirDelegNoGflag(t, env):
     CODE: DIRDELEG7
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env, [NOTIFY4_ADD_ENTRY], cb)
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    slot = sess2.compound_async(open_op)
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
     completed = cb.wait(2)
     env.sleep(.1)
 
@@ -395,6 +381,7 @@ def testDirDelegFiltering(t, env):
     CODE: DIRDELEG8
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     # Only request REMOVE notifications
     sess1, fh, deleg = _getDirDeleg(t, env,
@@ -403,13 +390,7 @@ def testDirDelegFiltering(t, env):
 
     # Trigger an ADD event (not requested) from a second client
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    slot = sess2.compound_async(open_op)
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
     completed = cb.wait(2)
     env.sleep(.1)
 
@@ -434,23 +415,14 @@ def testDirDelegRemove(t, env):
     CODE: DIRDELEG9
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_CHANGE_DIR_ATTRS,
                                       NOTIFY4_REMOVE_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     # Discard any notification for the holder's own create
     cb.reset()
@@ -479,22 +451,14 @@ def testDirDelegAdd(t, env):
     CODE: DIRDELEG10
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess2.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
 
     completed = cb.wait(2)
 
@@ -522,26 +486,16 @@ def testDirDelegRename(t, env):
     CODE: DIRDELEG11
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
 
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_RENAME_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    topdir = c.homedir + [t.code.encode('utf8')]
     oldpath = topdir + [env.testname(t)]
     newpath = topdir + [b"%s_2" % env.testname(t)]
     res = rename_obj(sess2, oldpath, newpath)
@@ -567,22 +521,14 @@ def testDirDelegChildAttrs(t, env):
     CODE: DIRDELEG12
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess2.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
 
     completed = cb.wait(2)
 
@@ -613,6 +559,7 @@ def testDirDelegDirAttrs(t, env):
     CODE: DIRDELEG13
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_CHANGE_DIR_ATTRS,
@@ -620,16 +567,7 @@ def testDirDelegDirAttrs(t, env):
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess2.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
 
     completed = cb.wait(2)
 
@@ -688,6 +626,7 @@ def testDirDelegReturnStopsNotify(t, env):
     CODE: DIRDELEG15
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
@@ -700,16 +639,7 @@ def testDirDelegReturnStopsNotify(t, env):
 
     # Now create a file from a second client
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess2.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
 
     # Wait briefly -- should NOT get any callback
     completed = cb.wait(2)
@@ -730,22 +660,14 @@ def testDirDelegFilehandle(t, env):
     CODE: DIRDELEG16
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess2.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
 
     completed = cb.wait(2)
 
@@ -780,27 +702,17 @@ def testDirDelegCrossRename(t, env):
     CODE: DIRDELEG17
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_REMOVE_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     # Create a file in the delegated directory
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     # Create a target directory (sibling of the delegated directory)
-    topdir = c.homedir + [t.code.encode('utf8')]
-    targetdir = c.homedir + [b"%s_target" % t.code.encode('utf8')]
+    targetdir =c.homedir + [b"%s_target" % t.code.encode('utf8')]
     res = create_obj(sess1, targetdir)
     check(res)
 
@@ -847,18 +759,7 @@ def testDirDelegCrossRenameTarget(t, env):
     res = create_obj(sess1, srcdir)
     check(res)
 
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    src_fh = res.resarray[-1].object
-    open_op = [ op.putfh(src_fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, srcdir + [env.testname(t)])
 
     # Rename the file into the delegated target directory from sess2
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
@@ -891,23 +792,14 @@ def testDirDelegLinkNotify(t, env):
     CODE: DIRDELEG19
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     # Create a file in the delegated directory from sess1
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
 
     # Clear the notification state from the create
     cb.reset()
@@ -944,22 +836,14 @@ def testDirDelegSameClientNoNotify(t, env):
     CODE: DIRDELEG20
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_ADD_ENTRY,
                                       NOTIFY4_GFLAG_EXTEND], cb)
 
     # Create a file from the delegation-holding session itself
-    claim = open_claim4(CLAIM_NULL, env.testname(t))
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
+    open_stateid, file_fh = _create_open(sess1, topdir + [env.testname(t)])
 
     # Wait briefly -- should NOT get any callback
     completed = cb.wait(2)
@@ -1002,36 +886,15 @@ def testDirDelegCrossRenameOver(t, env):
 
     # Create a file in the delegated directory (will be renamed over)
     victim_name = b"%s_victim" % env.testname(t)
-    claim = open_claim4(CLAIM_NULL, victim_name)
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid = res.resarray[-2].stateid
-    file_fh = res.resarray[-1].object
-    close_file(sess1, file_fh, stateid=open_stateid)
+    file_fh = _create_close(sess1, topdir + [victim_name])
 
     # Create a source directory and a file in it
     srcdir = c.homedir + [b"%s_src" % t.code.encode('utf8')]
     res = create_obj(sess1, srcdir)
     check(res)
-    src_fh = res.resarray[-1].object
 
     src_name = env.testname(t)
-    claim2 = open_claim4(CLAIM_NULL, src_name)
-    owner2 = open_owner4(0, b"owner2")
-    how2 = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-    open_op = [ op.putfh(src_fh), op.open(0,
-                                      OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                      OPEN4_SHARE_DENY_NONE, owner2, how2, claim2), op.getfh() ]
-    res = sess1.compound(open_op)
-    check(res)
-    open_stateid2 = res.resarray[-2].stateid
-    file_fh2 = res.resarray[-1].object
-    close_file(sess1, file_fh2, stateid=open_stateid2)
+    file_fh2 = _create_close(sess1, srcdir + [src_name], owner=b"owner2")
 
     # Clear notification state from creates above
     cb.reset()
@@ -1075,6 +938,7 @@ def testDirDelegRenameOver(t, env):
     CODE: DIRDELEG22
     """
     c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_RENAME_ENTRY,
@@ -1083,19 +947,8 @@ def testDirDelegRenameOver(t, env):
     # Create two files in the delegated directory from sess1
     src_name = env.testname(t)
     victim_name = b"%s_victim" % env.testname(t)
-    owner = open_owner4(0, b"owner")
-    how = openflag4(OPEN4_CREATE, createhow4(GUARDED4, {FATTR4_SIZE:0}))
-
     for name in [src_name, victim_name]:
-        claim = open_claim4(CLAIM_NULL, name)
-        open_op = [ op.putfh(fh), op.open(0,
-                                          OPEN4_SHARE_ACCESS_WRITE | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
-                                          OPEN4_SHARE_DENY_NONE, owner, how, claim), op.getfh() ]
-        res = sess1.compound(open_op)
-        check(res)
-        open_stateid = res.resarray[-2].stateid
-        file_fh = res.resarray[-1].object
-        close_file(sess1, file_fh, stateid=open_stateid)
+        _create_close(sess1, topdir + [name])
 
     # Rename src over victim from sess2
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
