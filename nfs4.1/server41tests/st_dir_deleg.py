@@ -77,9 +77,20 @@ def _getDirDeleg(t, env, notify_mask, cb):
     def notify_post_hook(arg, env, res):
         return res
 
+    def reset():
+        # A notification for the holder's own change arrives after the
+        # reply to that change.  Let it land before discarding it, so
+        # that it is not mistaken for the event under test.
+        cb.wait(0.5)
+        env.sleep(.1)
+        cb.clear()
+        cb.got_notify = False
+        del cb.changes[:]
+
     cb.got_recall = False
     cb.got_notify = False
     cb.changes = []
+    cb.reset = reset
 
     c = env.c1
     sess1 = c.new_client_session(b"%s_1" % env.testname(t))
@@ -433,6 +444,9 @@ def testDirDelegRemove(t, env):
     open_stateid = res.resarray[-2].stateid
     file_fh = res.resarray[-1].object
     close_file(sess1, file_fh, stateid=open_stateid)
+
+    # Discard any notification for the holder's own create
+    cb.reset()
 
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
     remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
@@ -889,8 +903,7 @@ def testDirDelegLinkNotify(t, env):
     close_file(sess1, file_fh, stateid=open_stateid)
 
     # Clear the notification state from the create
-    cb.clear()
-    cb.got_notify = False
+    cb.reset()
 
     # Link the file to a new name from sess2
     link_name = b"%s_link" % env.testname(t)
@@ -1014,8 +1027,7 @@ def testDirDelegCrossRenameOver(t, env):
     close_file(sess1, file_fh2, stateid=open_stateid2)
 
     # Clear notification state from creates above
-    cb.clear()
-    cb.got_notify = False
+    cb.reset()
 
     # Rename the source file over the victim in the delegated dir from sess2
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
