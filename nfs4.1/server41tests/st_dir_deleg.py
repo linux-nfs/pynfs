@@ -837,9 +837,13 @@ def testDirDelegCrossRenameTarget(t, env):
     c = env.c1
     cb = threading.Event()
 
+    # Get a dir delegation on the target directory
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
     # Create a source directory (not delegated) and a file in it
     srcdir = c.homedir + [b"%s_src" % t.code.encode('utf8')]
-    sess1 = c.new_client_session(b"%s_1" % env.testname(t))
     res = create_obj(sess1, srcdir)
     check(res)
 
@@ -855,11 +859,6 @@ def testDirDelegCrossRenameTarget(t, env):
     open_stateid = res.resarray[-2].stateid
     file_fh = res.resarray[-1].object
     close_file(sess1, file_fh, stateid=open_stateid)
-
-    # Get a dir delegation on the target directory
-    sess1, fh, deleg = _getDirDeleg(t, env,
-                                     [NOTIFY4_ADD_ENTRY,
-                                      NOTIFY4_GFLAG_EXTEND], cb)
 
     # Rename the file into the delegated target directory from sess2
     sess2 = c.new_client_session(b"%s_2" % env.testname(t))
