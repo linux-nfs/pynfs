@@ -1,7 +1,6 @@
 from .st_create_session import create_session
 from .st_open import open_claim4
 from xdrdef.nfs4_const import *
-from xdrdef.nfs4_pack import NFS4Unpacker
 
 from .environment import check, fail, create_obj, use_obj, close_file, rename_obj
 from xdrdef.nfs4_type import *
@@ -12,26 +11,40 @@ import threading
 
 zerotime = nfstime4(seconds=0, nseconds=0)
 
-def decode_notify_event(change):
-    """Decode a notify4 into its typed event structure."""
-    mask = nfs4lib.bitmap2list(change.notify_mask)
-    unpacker = NFS4Unpacker(change.notify_vals)
-    if NOTIFY4_REMOVE_ENTRY in mask:
-        return (NOTIFY4_REMOVE_ENTRY, unpacker.unpack_notify_remove4())
-    elif NOTIFY4_ADD_ENTRY in mask:
-        return (NOTIFY4_ADD_ENTRY, unpacker.unpack_notify_add4())
-    elif NOTIFY4_RENAME_ENTRY in mask:
-        return (NOTIFY4_RENAME_ENTRY, unpacker.unpack_notify_rename4())
-    elif NOTIFY4_CHANGE_DIR_ATTRS in mask:
-        return (NOTIFY4_CHANGE_DIR_ATTRS, unpacker.unpack_notify_attr4())
-    return (None, None)
+_notify_unpackers = {
+    NOTIFY4_CHANGE_CHILD_ATTRS: "unpack_notify_attr4",
+    NOTIFY4_CHANGE_DIR_ATTRS: "unpack_notify_attr4",
+    NOTIFY4_REMOVE_ENTRY: "unpack_notify_remove4",
+    NOTIFY4_ADD_ENTRY: "unpack_notify_add4",
+    NOTIFY4_RENAME_ENTRY: "unpack_notify_rename4",
+    NOTIFY4_CHANGE_COOKIE_VERIFIER: "unpack_notify_verifier4",
+}
 
-def bitmap4_to_int(bitmap):
-    """Convert a bitmap4 (list of uint32 words) to a single integer."""
-    result = 0
-    for i, word in enumerate(bitmap):
-        result |= word << (32 * i)
-    return result
+def decode_notify_events(changes):
+    """Decode a list of notify4 into (type, value) pairs, in wire order.
+
+    A notify4 may carry more than one bit in notify_mask.  notify_vals
+    then holds one structure per set bit, in bit order.  Nested fattr4
+    values come back as {bitnum: value} dicts.
+    """
+    events = []
+    for change in changes:
+        unpacker = nfs4lib.FancyNFS4Unpacker(change.notify_vals)
+        for bit in nfs4lib.bitmap2list(change.notify_mask):
+            if bit not in _notify_unpackers:
+                fail("Unknown notification type %d in CB_NOTIFY" % bit)
+            events.append((bit, getattr(unpacker, _notify_unpackers[bit])()))
+        unpacker.done()
+    return events
+
+def find_notify_event(cb, evt_type):
+    """Return the first received notification of the given type, or fail."""
+    events = decode_notify_events(cb.changes)
+    for got_type, evt in events:
+        if got_type == evt_type:
+            return evt
+    fail("Expected notification type %d, got %s" %
+         (evt_type, [got_type for got_type, evt in events]))
 
 def _getDirDeleg(t, env, notify_mask, cb):
     def recall_pre_hook(arg, env):
@@ -411,9 +424,7 @@ def testDirDelegRemove(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_REMOVE_ENTRY:
-        fail("Expected REMOVE notification, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
     if evt.nrm_old_entry.ne_file != env.testname(t):
         fail("Wrong entry name in REMOVE notification")
 
@@ -456,9 +467,7 @@ def testDirDelegAdd(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     if evt.nad_new_entry.ne_file != env.testname(t):
         fail("Wrong entry name in ADD notification")
 
@@ -503,9 +512,7 @@ def testDirDelegRename(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_RENAME_ENTRY:
-        fail("Expected RENAME notification, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_RENAME_ENTRY)
     if evt.nrn_old_entry.nrm_old_entry.ne_file != env.testname(t):
         fail("Wrong old entry name in RENAME notification")
 
@@ -548,15 +555,10 @@ def testDirDelegChildAttrs(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification, got %d" % evt_type)
-
-    attrs = evt.nad_new_entry.ne_attrs
-    if not any(attrs.attrmask):
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    attr_dict = evt.nad_new_entry.ne_attrs
+    if not attr_dict:
         fail("No child attributes in ADD notification")
-    attrs.attrmask = bitmap4_to_int(attrs.attrmask)
-    attr_dict = nfs4lib.fattr2dict(attrs)
     if FATTR4_SIZE in attr_dict and attr_dict[FATTR4_SIZE] != 0:
         fail("Expected size 0 for new file, got %d" % attr_dict[FATTR4_SIZE])
 
@@ -600,19 +602,9 @@ def testDirDelegDirAttrs(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    # Look for a CHANGE_DIR_ATTRS event among the changes
-    found_dir_attrs = False
-    for change in cb.changes:
-        evt_type, evt = decode_notify_event(change)
-        if evt_type == NOTIFY4_CHANGE_DIR_ATTRS:
-            found_dir_attrs = True
-            attrs = evt.na_changed_entry.ne_attrs
-            if not any(attrs.attrmask):
-                fail("No directory attributes in CHANGE_DIR_ATTRS notification")
-            break
-
-    if not found_dir_attrs:
-        fail("No CHANGE_DIR_ATTRS notification found")
+    evt = find_notify_event(cb, NOTIFY4_CHANGE_DIR_ATTRS)
+    if not evt.na_changed_entry.ne_attrs:
+        fail("No directory attributes in CHANGE_DIR_ATTRS notification")
 
 def testDirDelegMkdir(t, env):
     """Verify mkdir triggers ADD notification
@@ -641,9 +633,7 @@ def testDirDelegMkdir(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     if evt.nad_new_entry.ne_file != env.testname(t):
         fail("Wrong directory name in ADD notification")
 
@@ -728,13 +718,8 @@ def testDirDelegFilehandle(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification, got %d" % evt_type)
-
-    attrs = evt.nad_new_entry.ne_attrs
-    attrs.attrmask = bitmap4_to_int(attrs.attrmask)
-    attr_dict = nfs4lib.fattr2dict(attrs)
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    attr_dict = evt.nad_new_entry.ne_attrs
     if FATTR4_FILEHANDLE not in attr_dict:
         fail("No filehandle in ADD notification attributes")
     if attr_dict[FATTR4_FILEHANDLE] != file_fh:
@@ -791,9 +776,7 @@ def testDirDelegCrossRename(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_REMOVE_ENTRY:
-        fail("Expected REMOVE notification for cross-dir rename, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
     if evt.nrm_old_entry.ne_file != env.testname(t):
         fail("Wrong entry name in REMOVE notification")
 
@@ -851,9 +834,7 @@ def testDirDelegCrossRenameTarget(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification for cross-dir rename target, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     if evt.nad_new_entry.ne_file != env.testname(t):
         fail("Wrong entry name in ADD notification")
 
@@ -907,9 +888,7 @@ def testDirDelegLinkNotify(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_ADD_ENTRY:
-        fail("Expected ADD notification for link, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     if evt.nad_new_entry.ne_file != link_name:
         fail("Wrong entry name in ADD notification")
 
@@ -1036,20 +1015,13 @@ def testDirDelegCrossRenameOver(t, env):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
     # Look for ADD notification with nad_old_entry for the overwritten file
-    got_add = False
-    for change in cb.changes:
-        evt_type, evt = decode_notify_event(change)
-        if evt_type == NOTIFY4_ADD_ENTRY:
-            got_add = True
-            if evt.nad_new_entry.ne_file != victim_name:
-                fail("Wrong entry name in ADD notification")
-            if len(evt.nad_old_entry) != 1:
-                fail("Expected nad_old_entry to contain the overwritten entry")
-            if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
-                fail("Wrong overwritten entry name in nad_old_entry")
-
-    if not got_add:
-        fail("Missing ADD notification for cross-dir rename-over")
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != victim_name:
+        fail("Wrong entry name in ADD notification")
+    if len(evt.nad_old_entry) != 1:
+        fail("Expected nad_old_entry to contain the overwritten entry")
+    if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+        fail("Wrong overwritten entry name in nad_old_entry")
 
 def testDirDelegRenameOver(t, env):
     """Verify within-directory rename-over populates nad_old_entry
@@ -1104,9 +1076,7 @@ def testDirDelegRenameOver(t, env):
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
 
-    evt_type, evt = decode_notify_event(cb.changes[0])
-    if evt_type != NOTIFY4_RENAME_ENTRY:
-        fail("Expected RENAME notification, got %d" % evt_type)
+    evt = find_notify_event(cb, NOTIFY4_RENAME_ENTRY)
     if evt.nrn_old_entry.nrm_old_entry.ne_file != src_name:
         fail("Wrong old entry name in RENAME notification")
     if evt.nrn_new_entry.nad_new_entry.ne_file != victim_name:
