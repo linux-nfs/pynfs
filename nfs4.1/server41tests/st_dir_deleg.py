@@ -864,10 +864,12 @@ def testDirDelegSameClientNoNotify(t, env):
 
     close_file(sess1, file_fh, stateid=open_stateid)
 
-    if cb.got_notify:
-        fail("Got CB_NOTIFY for delegation holder's own change")
     if cb.got_recall:
         fail("Got CB_RECALL for delegation holder's own change")
+    # RFC 8881 requires this notification; the bis draft withholds it
+    # only when the server uses the order-agnostic format.
+    if cb.got_notify:
+        t.pass_warn("Got CB_NOTIFY for delegation holder's own change")
 
 def testDirDelegCrossRenameOver(t, env):
     """Verify cross-directory rename-over reports overwritten entry in nad_old_entry
