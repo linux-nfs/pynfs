@@ -150,9 +150,11 @@ def _getDirDeleg(t, env, notify_mask, cb):
                                                                      FATTR4_TIME_METADATA,
                                                                      FATTR4_TIME_MODIFY]))]
     res = sess1.compound(ops)
-    check(res, [NFS4_OK, NFS4ERR_NOTSUPP])
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_DIRDELEG_UNAVAIL])
     if (res.status == NFS4ERR_NOTSUPP):
-        t.pass_warn("Server doesn't support GET_DIR_DELEGATION")
+        t.fail_support("Server doesn't support GET_DIR_DELEGATION")
+    if (res.status == NFS4ERR_DIRDELEG_UNAVAIL):
+        t.pass_warn("Server refused a delegation on new dir.")
 
     nf = res.resarray[-1].gddr_res_non_fatal4
     if nf.gddrnf_status == GDD4_UNAVAIL:
