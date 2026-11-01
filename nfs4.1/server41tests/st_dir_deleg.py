@@ -46,6 +46,20 @@ def find_notify_event(cb, evt_type):
     fail("Expected notification type %d, got %s" %
          (evt_type, [got_type for got_type, evt in events]))
 
+def _reap_async(sess, slot, completed):
+    """Reap the conflicting operation issued with compound_async().
+
+    Fail on a missing callback first, so that an unexpected status on
+    the operation does not hide the recall diagnosis.  The server may
+    have refused the operation with NFS4ERR_DELAY while the recall was
+    outstanding (RFC 8881 Sections 18.4.3, 18.9.4, 18.16.4, 18.26.4).
+    """
+    res = sess.listen(slot)
+    if not completed:
+        fail("Expected callback not received")
+    check(res, [NFS4_OK, NFS4ERR_DELAY])
+    return res
+
 def _getDirDeleg(t, env, notify_mask, cb):
     def recall_pre_hook(arg, env):
         cb.stateid = arg.stateid # NOTE this must be done before set()
@@ -149,7 +163,7 @@ def testDirDelegSimple(t, env):
     check(res)
 
     # Reap the async open and close any file it created
-    res = sess2.listen(slot)
+    res = _reap_async(sess2, slot, completed)
     if res.status == NFS4_OK:
         open_stateid = res.resarray[-2].stateid
         file_fh = res.resarray[-1].object
@@ -215,6 +229,8 @@ def testDirDelegRemoveRecall(t, env):
     res = sess1.compound(ops)
     check(res)
 
+    _reap_async(sess2, slot, completed)
+
 def testDirDelegRenameRecall(t, env):
     """Verify rename triggers dir delegation recall
 
@@ -252,6 +268,8 @@ def testDirDelegRenameRecall(t, env):
 
     close_file(sess1, file_fh, stateid=open_stateid)
 
+    _reap_async(sess2, slot, completed)
+
 def testDirDelegMkdirRecall(t, env):
     """Verify mkdir triggers dir delegation recall
 
@@ -274,6 +292,8 @@ def testDirDelegMkdirRecall(t, env):
     ops = [ op.putfh(fh), op.delegreturn(deleg) ]
     res = sess1.compound(ops)
     check(res)
+
+    _reap_async(sess2, slot, completed)
 
 def testDirDelegLinkRecall(t, env):
     """Verify link triggers dir delegation recall
@@ -311,6 +331,8 @@ def testDirDelegLinkRecall(t, env):
     res = sess1.compound(ops)
     check(res)
 
+    _reap_async(sess2, slot, completed)
+
 def testDirDelegNoGflag(t, env):
     """Verify recall instead of notification without NOTIFY4_GFLAG_EXTEND
 
@@ -337,7 +359,7 @@ def testDirDelegNoGflag(t, env):
     check(res)
 
     # Reap the async open and close any file it created
-    res = sess2.listen(slot)
+    res = _reap_async(sess2, slot, completed)
     if res.status == NFS4_OK:
         open_stateid = res.resarray[-2].stateid
         file_fh = res.resarray[-1].object
@@ -378,7 +400,7 @@ def testDirDelegFiltering(t, env):
     check(res)
 
     # Reap the async open and close any file it created
-    res = sess2.listen(slot)
+    res = _reap_async(sess2, slot, completed)
     if res.status == NFS4_OK:
         open_stateid = res.resarray[-2].stateid
         file_fh = res.resarray[-1].object
