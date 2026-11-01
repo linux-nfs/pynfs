@@ -456,6 +456,7 @@ def testDirDelegRemove(t, env):
     completed = cb.wait(5)
     ops = [ op.putfh(fh), op.delegreturn(deleg) ]
     res = sess1.compound(ops)
+    check(res)
 
     if (not completed or not cb.got_notify):
         fail("Didn't receive a CB_NOTIFY from the server!")
