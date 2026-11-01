@@ -164,6 +164,8 @@ def _getDirDeleg(t, env, notify_mask, cb):
 
     deleg = res.resarray[-1].gddrnf_resok4.gddr_stateid
     cb.granted = nf.gddrnf_resok4.gddr_notification
+    cb.child_attrs = nf.gddrnf_resok4.gddr_child_attributes
+    cb.dir_attrs = nf.gddrnf_resok4.gddr_dir_attributes
     if NOTIFY4_GFLAG_EXTEND in notify_mask and \
        nf.gddrnf_resok4.gddr_notification != mask_bm:
         ops = [ op.putfh(fh), op.delegreturn(deleg) ]
@@ -550,6 +552,8 @@ def testDirDelegChildAttrs(t, env):
     evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     attr_dict = evt.nad_new_entry.ne_attrs
     if not attr_dict:
+        if not cb.child_attrs:
+            t.pass_warn("Server offered no child attribute notifications")
         fail("No child attributes in ADD notification")
     if FATTR4_SIZE in attr_dict and attr_dict[FATTR4_SIZE] != 0:
         fail("Expected size 0 for new file, got %d" % attr_dict[FATTR4_SIZE])
@@ -588,6 +592,8 @@ def testDirDelegDirAttrs(t, env):
 
     evt = find_notify_event(cb, NOTIFY4_CHANGE_DIR_ATTRS)
     if not evt.na_changed_entry.ne_attrs:
+        if not cb.dir_attrs:
+            t.pass_warn("Server offered no directory attribute notifications")
         fail("No directory attributes in CHANGE_DIR_ATTRS notification")
 
 def testDirDelegMkdir(t, env):
@@ -689,6 +695,8 @@ def testDirDelegFilehandle(t, env):
     evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     attr_dict = evt.nad_new_entry.ne_attrs
     if FATTR4_FILEHANDLE not in attr_dict:
+        if FATTR4_FILEHANDLE not in nfs4lib.bitmap2list(cb.child_attrs):
+            t.pass_warn("Server did not offer filehandle notifications")
         fail("No filehandle in ADD notification attributes")
     if attr_dict[FATTR4_FILEHANDLE] != file_fh:
         fail("Filehandle in notification doesn't match GETFH result")
