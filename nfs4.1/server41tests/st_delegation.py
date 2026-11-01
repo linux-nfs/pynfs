@@ -8,7 +8,6 @@ import nfs_ops
 op = nfs_ops.NFS4ops()
 import nfs4lib
 import threading
-import time
 
 def _got_deleg(deleg):
     return (deleg.delegation_type != OPEN_DELEGATE_NONE and
@@ -560,12 +559,25 @@ def testCbGetattrAfterSyncWrite(t, env):
     check(res)
 
     if delegtype == OPEN_DELEGATE_WRITE_ATTRS_DELEG:
+        # The server may ignore a proxied time that is before the
+        # file's time_modify and clamp one that is past its own clock
+        # (RFC 9754, section 5), so sample the server's clock rather
+        # than this host's: create a scratch directory, take its
+        # time_modify, and remove it.
+        name = env.testname(t) + b"_clock"
+        res = sess1.compound(env.home + [op.savefh(),
+                                         op.create(createtype4(NF4DIR), name,
+                                                   {FATTR4_MODE: 0o755}),
+                                         op.getattr(1<<FATTR4_TIME_MODIFY),
+                                         op.restorefh(),
+                                         op.remove(name)])
+        check(res)
+        now = res.resarray[-3].obj_attributes[FATTR4_TIME_MODIFY]
         attrs2 = dict(attrs1)
-        now = divmod(time.time_ns(), 1000000000)
-        attrs2[FATTR4_TIME_ACCESS] = nfstime4(*now)
-        attrs2[FATTR4_TIME_MODIFY] = nfstime4(*now)
-        cbattrs[FATTR4_TIME_DELEG_ACCESS] = nfstime4(*now)
-        cbattrs[FATTR4_TIME_DELEG_MODIFY] = nfstime4(*now)
+        attrs2[FATTR4_TIME_ACCESS] = now
+        attrs2[FATTR4_TIME_MODIFY] = now
+        cbattrs[FATTR4_TIME_DELEG_ACCESS] = nfstime4(now.seconds, now.nseconds)
+        cbattrs[FATTR4_TIME_DELEG_MODIFY] = nfstime4(now.seconds, now.nseconds)
     else:
         attrs2 = do_getattrdict(sess1, fh, [FATTR4_CHANGE, FATTR4_SIZE,
                                             FATTR4_TIME_ACCESS, FATTR4_TIME_MODIFY])
