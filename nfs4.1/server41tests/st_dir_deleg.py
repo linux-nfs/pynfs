@@ -82,7 +82,12 @@ def _create_close(sess, path, owner=b"owner"):
     return create_close(sess, owner, path, attrs=_create_attrs,
                         access=_create_access)
 
-def _getDirDeleg(t, env, notify_mask, cb):
+def _getDirDeleg(t, env, notify_mask, cb, optional=[]):
+    """Get a directory delegation on a fresh directory.
+
+    notify_mask lists the notifications to request.  Those also listed
+    in optional may be absent from the grant without ending the test.
+    """
     def recall_pre_hook(arg, env):
         cb.stateid = arg.stateid # NOTE this must be done before set()
         cb.cred = env.cred.raw_cred
@@ -166,8 +171,10 @@ def _getDirDeleg(t, env, notify_mask, cb):
     cb.granted = nf.gddrnf_resok4.gddr_notification
     cb.child_attrs = nf.gddrnf_resok4.gddr_child_attributes
     cb.dir_attrs = nf.gddrnf_resok4.gddr_dir_attributes
+    required = nfs4lib.list2bitmap([bit for bit in notify_mask
+                                    if bit not in optional])
     if NOTIFY4_GFLAG_EXTEND in notify_mask and \
-       nf.gddrnf_resok4.gddr_notification != mask_bm:
+       cb.granted & required != required:
         ops = [ op.putfh(fh), op.delegreturn(deleg) ]
         res = sess1.compound(ops)
         t.pass_warn("Server didn't offer the necessary directory notifications for this test")
@@ -934,10 +941,15 @@ def testDirDelegCrossRenameOver(t, env):
     evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
     if evt.nad_new_entry.ne_file != victim_name:
         fail("Wrong entry name in ADD notification")
-    if len(evt.nad_old_entry) != 1:
-        fail("Expected nad_old_entry to contain the overwritten entry")
-    if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
-        fail("Wrong overwritten entry name in nad_old_entry")
+    if len(evt.nad_old_entry) == 1:
+        if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+            fail("Wrong overwritten entry name in nad_old_entry")
+    else:
+        # The removal was not atomic with the rename (RFC 8881
+        # Section 18.26.4), so the victim is reported by a REMOVE.
+        evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+        if evt.nrm_old_entry.ne_file != victim_name:
+            fail("Wrong entry name in REMOVE notification")
 
 def testDirDelegRenameOver(t, env):
     """Verify within-directory rename-over populates nad_old_entry
@@ -954,7 +966,9 @@ def testDirDelegRenameOver(t, env):
     cb = threading.Event()
     sess1, fh, deleg = _getDirDeleg(t, env,
                                      [NOTIFY4_RENAME_ENTRY,
-                                      NOTIFY4_GFLAG_EXTEND], cb)
+                                      NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb,
+                                     optional=[NOTIFY4_REMOVE_ENTRY])
 
     # Create two files in the delegated directory from sess1
     src_name = env.testname(t)
@@ -987,7 +1001,15 @@ def testDirDelegRenameOver(t, env):
         fail("Wrong old entry name in RENAME notification")
     if evt.nrn_new_entry.nad_new_entry.ne_file != victim_name:
         fail("Wrong new entry name in RENAME notification")
-    if len(evt.nrn_new_entry.nad_old_entry) != 1:
-        fail("Expected nad_old_entry to contain the overwritten entry")
-    if evt.nrn_new_entry.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
-        fail("Wrong overwritten entry name in nad_old_entry")
+    if len(evt.nrn_new_entry.nad_old_entry) == 1:
+        if evt.nrn_new_entry.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+            fail("Wrong overwritten entry name in nad_old_entry")
+    else:
+        # The removal was not atomic with the rename (RFC 8881
+        # Section 18.26.4), so the victim is reported by a REMOVE.
+        if NOTIFY4_REMOVE_ENTRY not in nfs4lib.bitmap2list(cb.granted):
+            fail("Overwritten entry not in nad_old_entry and "
+                 "REMOVE_ENTRY notifications not granted")
+        evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+        if evt.nrm_old_entry.ne_file != victim_name:
+            fail("Wrong entry name in REMOVE notification")
