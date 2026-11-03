@@ -250,14 +250,4 @@ def testOpenConfirmFail(t, env):
     ops += [op.open_confirm(stateid, c.get_seqid(t.word())+1)]
     _replay(env, c, ops, NFS4ERR_BAD_SEQID)
 
-def testMkdirReplay(t, env):
-    """REPLAY a succesful directory CREATE
-
-    FLAGS: replay all
-    DEPEND: MKDIR
-    CODE: RPLY14
-    """
-    c = env.c1
-    c.init_connection()
-    ops = c.go_home() + [op.create(createtype4(NF4DIR), t.word(), {})]
-    _replay(env, c, ops)
+# RPLY14 permanently retired, please do not reuse
