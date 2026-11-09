@@ -9,13 +9,13 @@ correct and does only one thing.
 
 When you're done, send the resulting patches
 
-	To: calum.mackay@oracle.com, jlayton@kernel.org, cel@kernel.org
+	To: calum.mackay@cdmnet.org, jlayton@kernel.org, cel@kernel.org
 	Cc: linux-nfs@vger.kernel.org
 
 using something like:
 
 	git format-patch origin..
-	git send-email --to="calum.mackay@oracle.com" \
+	git send-email --to="calum.mackay@cdmnet.org" \
 			--to="jlayton@kernel.org" \
 			--to="cel@kernel.org" \
 			--cc="linux-nfs@vger.kernel.org" 0*
