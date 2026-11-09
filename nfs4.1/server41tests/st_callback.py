@@ -59,9 +59,17 @@ def testCbNotifyLockExpiredClient(t, env):
     res = sess2.compound([op.putfh(fh2), lock_op])
     check(res, NFS4ERR_DENIED)
 
-    # keep the first client active, allow the second client to expire
-    for i in range(3):
-        env.sleep(60)
+    res = sess1.compound([op.putrootfh(), op.getattr(1 << FATTR4_LEASE_TIME)])
+    check(res)
+    lease_time = res.resarray[-1].obj_attributes[FATTR4_LEASE_TIME]
+
+    # Keep the first client active and let the second client sit idle
+    # for two lease periods. The first client must renew within each
+    # lease period: it holds a lock the second client is blocked on, so
+    # a server that lets its lease lapse may expire it rather than keep
+    # it as a courtesy client.
+    for i in range(4):
+        env.sleep(lease_time / 2, "half the lease period")
         res = sess1.compound([])
         check(res, NFS4_OK)
 
