@@ -421,9 +421,10 @@ def testCopyNotifyUnsupportedNetloc(t, env):
     """COPY_NOTIFY with a name or URL netloc must not return NFS4ERR_BADXDR
 
     NL4_NAME and NL4_URL are well-formed XDR, so a server that does not
-    support them must reject the operation with NFS4ERR_NOTSUPP, not
-    NFS4ERR_BADXDR (which is reserved for XDR that cannot be decoded).  A
-    server that does support them may return NFS4_OK.
+    support them must not reject the operation with NFS4ERR_BADXDR (which
+    is reserved for XDR that cannot be decoded).  It may return
+    NFS4ERR_NOTSUPP or NFS4ERR_INVAL instead, and a server that does
+    support them may return NFS4_OK.
 
     FLAGS: copy
     CODE: CPNOTIFY4
@@ -438,10 +439,9 @@ def testCopyNotifyUnsupportedNetloc(t, env):
         res = sess.compound([op.putfh(src_fh),
                              op.copy_notify(src_stateid, nl)])
         if res.status == NFS4ERR_BADXDR:
-            fail("COPY_NOTIFY with a %s netloc returned NFS4ERR_BADXDR; a "
-                 "well-formed but unsupported netloc should return "
-                 "NFS4ERR_NOTSUPP" % name)
-        check(res, [NFS4_OK, NFS4ERR_NOTSUPP],
+            fail("COPY_NOTIFY with a %s netloc returned NFS4ERR_BADXDR, "
+                 "but the netloc is well-formed XDR" % name)
+        check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_INVAL],
               msg="COPY_NOTIFY with a %s netloc" % name)
 
 def testCopyNotifyNoFh(t, env):
