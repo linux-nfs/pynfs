@@ -89,6 +89,7 @@ def testSyncCopy(t, env):
 
     FLAGS: copy
     CODE: COPY1
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -125,6 +126,7 @@ def testCopyWithOffset(t, env):
 
     FLAGS: copy
     CODE: COPY2
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -150,6 +152,7 @@ def testAsyncCopy(t, env):
 
     FLAGS: copy
     CODE: COPY3
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -183,6 +186,7 @@ def testZeroLengthCopy(t, env):
 
     FLAGS: copy
     CODE: COPY5
+    VERS: 2-
     """
     sess1 = env.c1.new_client_session(env.testname(t))
     res = create_file(sess1, env.testname(t))
@@ -212,6 +216,7 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
 
     FLAGS: copy
     CODE: COPY6
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -254,6 +259,7 @@ def testOffloadCancel(t, env):
 
     FLAGS: copy
     CODE: COPY7
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -282,6 +288,7 @@ def testCopyBadSourceStateid(t, env):
 
     FLAGS: copy
     CODE: COPY8
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, _src_stateid = _create_and_open(sess, env.testname(t))
@@ -296,6 +303,7 @@ def testCopyBadDestStateid(t, env):
 
     FLAGS: copy
     CODE: COPY9
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
@@ -311,6 +319,7 @@ def testOffloadStatusNoState(t, env):
 
     FLAGS: copy
     CODE: COPY10
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, _stateid = _create_and_open(sess, env.testname(t))
@@ -324,6 +333,7 @@ def testCopyToSameFile(t, env):
 
     FLAGS: copy
     CODE: COPY11
+    VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
     fh, stateid = _create_and_open(sess, env.testname(t))
