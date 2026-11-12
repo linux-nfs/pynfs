@@ -1,0 +1,1015 @@
+from .st_create_session import create_session
+from .st_open import open_claim4
+from xdrdef.nfs4_const import *
+
+from .environment import check, fail, create_obj, use_obj, close_file, rename_obj
+from .environment import open_create_file_op, create_confirm, create_close
+from xdrdef.nfs4_type import *
+import nfs_ops
+op = nfs_ops.NFS4ops()
+import nfs4lib
+import threading
+
+zerotime = nfstime4(seconds=0, nseconds=0)
+
+_notify_unpackers = {
+    NOTIFY4_CHANGE_CHILD_ATTRS: "unpack_notify_attr4",
+    NOTIFY4_CHANGE_DIR_ATTRS: "unpack_notify_attr4",
+    NOTIFY4_REMOVE_ENTRY: "unpack_notify_remove4",
+    NOTIFY4_ADD_ENTRY: "unpack_notify_add4",
+    NOTIFY4_RENAME_ENTRY: "unpack_notify_rename4",
+    NOTIFY4_CHANGE_COOKIE_VERIFIER: "unpack_notify_verifier4",
+}
+
+def decode_notify_events(changes):
+    """Decode a list of notify4 into (type, value) pairs, in wire order.
+
+    A notify4 may carry more than one bit in notify_mask.  notify_vals
+    then holds one structure per set bit, in bit order.  Nested fattr4
+    values come back as {bitnum: value} dicts.
+    """
+    events = []
+    for change in changes:
+        unpacker = nfs4lib.FancyNFS4Unpacker(change.notify_vals)
+        for bit in nfs4lib.bitmap2list(change.notify_mask):
+            if bit not in _notify_unpackers:
+                fail("Unknown notification type %d in CB_NOTIFY" % bit)
+            events.append((bit, getattr(unpacker, _notify_unpackers[bit])()))
+        unpacker.done()
+    return events
+
+def find_notify_event(cb, evt_type):
+    """Return the first received notification of the given type, or fail."""
+    events = decode_notify_events(cb.changes)
+    for got_type, evt in events:
+        if got_type == evt_type:
+            return evt
+    fail("Expected notification type %d, got %s" %
+         (evt_type, [got_type for got_type, evt in events]))
+
+def _reap_async(sess, slot, completed):
+    """Reap the conflicting operation issued with compound_async().
+
+    Fail on a missing callback first, so that an unexpected status on
+    the operation does not hide the recall diagnosis.  The server may
+    have refused the operation with NFS4ERR_DELAY while the recall was
+    outstanding (RFC 8881 Sections 18.4.3, 18.9.4, 18.16.4, 18.26.4).
+    """
+    res = sess.listen(slot)
+    if not completed:
+        fail("Expected callback not received")
+    check(res, [NFS4_OK, NFS4ERR_DELAY])
+    return res
+
+# Every test creates its files the same way: an empty regular file,
+# opened for write with no delegation wanted.
+_create_attrs = {FATTR4_SIZE: 0}
+_create_access = OPEN4_SHARE_ACCESS_WRITE
+
+def _create_ops(sess, path, owner=b"owner"):
+    """Build the OPEN(CREATE)/GETFH compound for a regular file at path."""
+    return open_create_file_op(sess, owner, path, attrs=_create_attrs,
+                               access=_create_access, open_create=OPEN4_CREATE)
+
+def _create_open(sess, path, owner=b"owner"):
+    """Create a regular file at path; return (open stateid, filehandle)."""
+    fh, stateid = create_confirm(sess, owner, path, attrs=_create_attrs,
+                                 access=_create_access)
+    return stateid, fh
+
+def _create_close(sess, path, owner=b"owner"):
+    """Create a regular file at path and close it; return its filehandle."""
+    return create_close(sess, owner, path, attrs=_create_attrs,
+                        access=_create_access)
+
+def _getDirDeleg(t, env, notify_mask, cb, optional=[]):
+    """Get a directory delegation on a fresh directory.
+
+    notify_mask lists the notifications to request.  Those also listed
+    in optional may be absent from the grant without ending the test.
+    """
+    def recall_pre_hook(arg, env):
+        cb.stateid = arg.stateid # NOTE this must be done before set()
+        cb.cred = env.cred.raw_cred
+        cb.got_recall = True
+        env.notify = cb.set # This is called after compound sent to queue
+    def recall_post_hook(arg, env, res):
+        return res
+    def notify_pre_hook(arg, env):
+        cb.stateid = arg.cna_stateid
+        cb.fh = arg.cna_fh
+        cb.changes.extend(arg.cna_changes)
+        cb.got_notify = True
+        env.notify = cb.set # This is called after compound sent to queue
+    def notify_post_hook(arg, env, res):
+        return res
+
+    def reset():
+        # A notification for the holder's own change arrives after the
+        # reply to that change.  Let it land before discarding it, so
+        # that it is not mistaken for the event under test.
+        cb.wait(0.5)
+        env.sleep(.1)
+        cb.clear()
+        cb.got_notify = False
+        del cb.changes[:]
+
+    cb.got_recall = False
+    cb.got_notify = False
+    cb.changes = []
+    cb.reset = reset
+
+    c = env.c1
+    sess1 = c.new_client_session(b"%s_1" % env.testname(t))
+    sess1.client.cb_pre_hook(OP_CB_RECALL, recall_pre_hook)
+    sess1.client.cb_post_hook(OP_CB_RECALL, recall_post_hook)
+    sess1.client.cb_pre_hook(OP_CB_NOTIFY, notify_pre_hook)
+    sess1.client.cb_post_hook(OP_CB_NOTIFY, notify_post_hook)
+
+    topdir = c.homedir + [t.code.encode('utf8')]
+    res = create_obj(sess1, topdir)
+    check(res)
+    fh = res.resarray[-1].object
+
+    mask_bm = nfs4lib.list2bitmap(notify_mask)
+    ops = [ op.putfh(fh), op.get_dir_delegation(False, nfs4lib.list2bitmap(notify_mask),
+                                                zerotime, zerotime,
+                                                nfs4lib.list2bitmap([FATTR4_TYPE,
+                                                                     FATTR4_CHANGE,
+                                                                     FATTR4_SIZE,
+                                                                     FATTR4_FILEID,
+                                                                     FATTR4_FILEHANDLE,
+                                                                     FATTR4_MODE,
+                                                                     FATTR4_NUMLINKS,
+                                                                     FATTR4_RAWDEV,
+                                                                     FATTR4_SPACE_USED,
+                                                                     FATTR4_TIME_ACCESS,
+                                                                     FATTR4_TIME_METADATA,
+                                                                     FATTR4_TIME_MODIFY,
+                                                                     FATTR4_TIME_CREATE]),
+                                                nfs4lib.list2bitmap([FATTR4_CHANGE,
+                                                                     FATTR4_SIZE,
+                                                                     FATTR4_NUMLINKS,
+                                                                     FATTR4_SPACE_USED,
+                                                                     FATTR4_TIME_ACCESS,
+                                                                     FATTR4_TIME_METADATA,
+                                                                     FATTR4_TIME_MODIFY]))]
+    res = sess1.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_DIRDELEG_UNAVAIL])
+    if (res.status == NFS4ERR_NOTSUPP):
+        t.fail_support("Server doesn't support GET_DIR_DELEGATION")
+    if (res.status == NFS4ERR_DIRDELEG_UNAVAIL):
+        t.pass_warn("Server refused a delegation on new dir.")
+
+    nf = res.resarray[-1].gddr_res_non_fatal4
+    if nf.gddrnf_status == GDD4_UNAVAIL:
+        t.pass_warn("Server reported that delegation on new dir was unavailable.")
+    elif nf.gddrnf_status != GDD4_OK:
+        t.fail("Server returned unknown non-fatal status code.")
+
+    deleg = res.resarray[-1].gddrnf_resok4.gddr_stateid
+    cb.granted = nf.gddrnf_resok4.gddr_notification
+    cb.child_attrs = nf.gddrnf_resok4.gddr_child_attributes
+    cb.dir_attrs = nf.gddrnf_resok4.gddr_dir_attributes
+    required = nfs4lib.list2bitmap([bit for bit in notify_mask
+                                    if bit not in optional])
+    if NOTIFY4_GFLAG_EXTEND in notify_mask and \
+       cb.granted & required != required:
+        ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+        res = sess1.compound(ops)
+        t.pass_warn("Server didn't offer the necessary directory notifications for this test")
+
+    return (sess1, fh, deleg)
+
+def testDirDelegSimple(t, env):
+    """Test basic dir delegation handout, recall and return
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG1
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # new client -- create a file in the dir
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    # Reap the async open and close any file it created
+    res = _reap_async(sess2, slot, completed)
+    if res.status == NFS4_OK:
+        open_stateid = res.resarray[-2].stateid
+        file_fh = res.resarray[-1].object
+        close_file(sess2, file_fh, stateid=open_stateid)
+
+def testDirDelegDuplicate(t, env):
+    """Test that server returns GDD4_UNAVAIL on duplicate GDD4 request
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG2
+    """
+    c = env.c1
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # get a dir deleg with no notifications
+    ops = [ op.putfh(fh), op.get_dir_delegation(False,
+                                                nfs4lib.list2bitmap([]),
+                                                zerotime, zerotime,
+                                                nfs4lib.list2bitmap([]),
+                                                nfs4lib.list2bitmap([]))]
+    res = sess1.compound(ops)
+    check(res)
+    nfstatus = res.resarray[-1].gddr_res_non_fatal4.gddrnf_status
+    if (nfstatus != GDD4_UNAVAIL):
+        fail("Server replied to duplicate request with %d" % nfstatus)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+def testDirDelegRemoveRecall(t, env):
+    """Verify remove triggers dir delegation recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG3
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # Create a file from sess1
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    # Remove the file from sess2 -- should trigger recall
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    slot = sess2.compound_async(remove_op)
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    _reap_async(sess2, slot, completed)
+
+def testDirDelegRenameRecall(t, env):
+    """Verify rename triggers dir delegation recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG4
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # Create a file from sess1
+    open_stateid, file_fh = _create_open(sess1, topdir + [env.testname(t)])
+
+    # Rename the file from sess2 -- should trigger recall
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    rename_op = [ op.putfh(fh), op.savefh(),
+                  op.putfh(fh),
+                  op.rename(env.testname(t), b"%s_2" % env.testname(t)) ]
+    slot = sess2.compound_async(rename_op)
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    close_file(sess1, file_fh, stateid=open_stateid)
+
+    _reap_async(sess2, slot, completed)
+
+def testDirDelegMkdirRecall(t, env):
+    """Verify mkdir triggers dir delegation recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG5
+    """
+    c = env.c1
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # Create a subdirectory from sess2 -- should trigger recall
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    create_op = [ op.putfh(fh),
+                  op.create(createtype4(NF4DIR), env.testname(t),
+                            {FATTR4_MODE: 0o755}) ]
+    slot = sess2.compound_async(create_op)
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    _reap_async(sess2, slot, completed)
+
+def testDirDelegLinkRecall(t, env):
+    """Verify link triggers dir delegation recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG6
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    recall = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [], recall)
+
+    # Create a file from sess1
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    # Link the file to a new name from sess2 -- should trigger recall
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    link_op = [ op.putfh(file_fh), op.savefh(),
+                op.putfh(fh),
+                op.link(b"%s_link" % env.testname(t)) ]
+    slot = sess2.compound_async(link_op)
+    completed = recall.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    _reap_async(sess2, slot, completed)
+
+def testDirDelegNoGflag(t, env):
+    """Verify notification or recall matches the grant without NOTIFY4_GFLAG_EXTEND
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG7
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env, [NOTIFY4_ADD_ENTRY], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
+    completed = cb.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    # Reap the async open and close any file it created
+    res = _reap_async(sess2, slot, completed)
+    if res.status == NFS4_OK:
+        open_stateid = res.resarray[-2].stateid
+        file_fh = res.resarray[-1].object
+        close_file(sess2, file_fh, stateid=open_stateid)
+
+    # A server that granted ADD_ENTRY notifications to an order-aware
+    # client must deliver them.  One that declined them must recall.
+    if NOTIFY4_ADD_ENTRY in nfs4lib.bitmap2list(cb.granted):
+        if not cb.got_notify:
+            fail("Server granted ADD_ENTRY notifications but sent no CB_NOTIFY")
+        return
+    if cb.got_notify:
+        fail("Got CB_NOTIFY for a notification the server did not grant")
+    if not cb.got_recall:
+        fail("Expected CB_RECALL without GFLAG_EXTEND, but didn't get one")
+
+def testDirDelegFiltering(t, env):
+    """Verify unrequested notification type triggers recall
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG8
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    # Only request REMOVE notifications
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Trigger an ADD event (not requested) from a second client
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    slot = sess2.compound_async(_create_ops(sess2, topdir + [env.testname(t)]))
+    completed = cb.wait(2)
+    env.sleep(.1)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    # Reap the async open and close any file it created
+    res = _reap_async(sess2, slot, completed)
+    if res.status == NFS4_OK:
+        open_stateid = res.resarray[-2].stateid
+        file_fh = res.resarray[-1].object
+        close_file(sess2, file_fh, stateid=open_stateid)
+
+    if not cb.got_recall:
+        fail("Expected CB_RECALL for unrequested notification type")
+
+def testDirDelegRemove(t, env):
+    """Create a dir_deleg that accepts notification of REMOVE events
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG9
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_CHANGE_DIR_ATTRS,
+                                      NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    # Discard any notification for the holder's own create
+    cb.reset()
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    completed = cb.wait(5)
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+    if evt.nrm_old_entry.ne_file != env.testname(t):
+        fail("Wrong entry name in REMOVE notification")
+
+def testDirDelegAdd(t, env):
+    """Create a dir_deleg that accepts notification of ADD events
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG10
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != env.testname(t):
+        fail("Wrong entry name in ADD notification")
+
+def testDirDelegRename(t, env):
+    """Create a dir_deleg that accepts notification of RENAME events
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG11
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_RENAME_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    oldpath = topdir + [env.testname(t)]
+    newpath = topdir + [b"%s_2" % env.testname(t)]
+    res = rename_obj(sess2, oldpath, newpath)
+    check(res)
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_RENAME_ENTRY)
+    if evt.nrn_old_entry.nrm_old_entry.ne_file != env.testname(t):
+        fail("Wrong old entry name in RENAME notification")
+
+def testDirDelegChildAttrs(t, env):
+    """Verify child attributes are present in ADD notification
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG12
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    attr_dict = evt.nad_new_entry.ne_attrs
+    if not attr_dict:
+        if not cb.child_attrs:
+            t.pass_warn("Server offered no child attribute notifications")
+        fail("No child attributes in ADD notification")
+    if FATTR4_SIZE in attr_dict and attr_dict[FATTR4_SIZE] != 0:
+        fail("Expected size 0 for new file, got %d" % attr_dict[FATTR4_SIZE])
+
+def testDirDelegDirAttrs(t, env):
+    """Verify CHANGE_DIR_ATTRS notification on directory change
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG13
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_CHANGE_DIR_ATTRS,
+                                      NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_CHANGE_DIR_ATTRS)
+    if not evt.na_changed_entry.ne_attrs:
+        if not cb.dir_attrs:
+            t.pass_warn("Server offered no directory attribute notifications")
+        fail("No directory attributes in CHANGE_DIR_ATTRS notification")
+
+def testDirDelegMkdir(t, env):
+    """Verify mkdir triggers ADD notification
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG14
+    """
+    c = env.c1
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    topdir = c.homedir + [t.code.encode('utf8')]
+    subdir = topdir + [env.testname(t)]
+    res = create_obj(sess2, subdir)
+    check(res)
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != env.testname(t):
+        fail("Wrong directory name in ADD notification")
+
+def testDirDelegReturnStopsNotify(t, env):
+    """Verify DELEGRETURN stops notifications
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG15
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Immediately return the delegation
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    # Now create a file from a second client
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
+
+    # Wait briefly -- should NOT get any callback
+    completed = cb.wait(2)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if cb.got_notify or cb.got_recall:
+        fail("Received callback after DELEGRETURN")
+
+def testDirDelegFilehandle(t, env):
+    """Verify filehandle in ADD notification matches GETFH result
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG16
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    open_stateid, file_fh = _create_open(sess2, topdir + [env.testname(t)])
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    close_file(sess2, file_fh, stateid=open_stateid)
+
+    remove_op = [ op.putfh(fh), op.remove(env.testname(t)) ]
+    res = sess2.compound(remove_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    attr_dict = evt.nad_new_entry.ne_attrs
+    if FATTR4_FILEHANDLE not in attr_dict:
+        if FATTR4_FILEHANDLE not in nfs4lib.bitmap2list(cb.child_attrs):
+            t.pass_warn("Server did not offer filehandle notifications")
+        fail("No filehandle in ADD notification attributes")
+    if attr_dict[FATTR4_FILEHANDLE] != file_fh:
+        fail("Filehandle in notification doesn't match GETFH result")
+
+def testDirDelegCrossRename(t, env):
+    """Verify cross-directory rename generates REMOVE notification on source
+
+    Per RFC 8881bis Section 27.4.6, a rename across directories sends
+    a REMOVE notification to the source directory and an ADD notification
+    to the target directory, rather than a RENAME notification.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG17
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create a file in the delegated directory
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    # Create a target directory (sibling of the delegated directory)
+    targetdir =c.homedir + [b"%s_target" % t.code.encode('utf8')]
+    res = create_obj(sess1, targetdir)
+    check(res)
+
+    # Rename the file from the delegated dir to the target dir from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    oldpath = topdir + [env.testname(t)]
+    newpath = targetdir + [env.testname(t)]
+    res = rename_obj(sess2, oldpath, newpath)
+    check(res)
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+    if evt.nrm_old_entry.ne_file != env.testname(t):
+        fail("Wrong entry name in REMOVE notification")
+
+def testDirDelegCrossRenameTarget(t, env):
+    """Verify cross-directory rename generates ADD notification on target
+
+    Per RFC 8881bis Section 27.4.6, a rename across directories sends
+    a REMOVE notification to the source directory and an ADD notification
+    to the target directory.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG18
+    """
+    c = env.c1
+    cb = threading.Event()
+
+    # Get a dir delegation on the target directory
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create a source directory (not delegated) and a file in it
+    srcdir = c.homedir + [b"%s_src" % t.code.encode('utf8')]
+    res = create_obj(sess1, srcdir)
+    check(res)
+
+    file_fh = _create_close(sess1, srcdir + [env.testname(t)])
+
+    # Rename the file into the delegated target directory from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    topdir = c.homedir + [t.code.encode('utf8')]
+    oldpath = srcdir + [env.testname(t)]
+    newpath = topdir + [env.testname(t)]
+    res = rename_obj(sess2, oldpath, newpath)
+    check(res)
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != env.testname(t):
+        fail("Wrong entry name in ADD notification")
+
+def testDirDelegLinkNotify(t, env):
+    """Verify hard link triggers ADD notification
+
+    Per RFC 8881bis Section 27.4.4, the server sends an ADD notification
+    when a hard link is being created to an existing file.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG19
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create a file in the delegated directory from sess1
+    file_fh = _create_close(sess1, topdir + [env.testname(t)])
+
+    # Clear the notification state from the create
+    cb.reset()
+
+    # Link the file to a new name from sess2
+    link_name = b"%s_link" % env.testname(t)
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    link_op = [ op.putfh(file_fh), op.savefh(),
+                op.putfh(fh),
+                op.link(link_name) ]
+    res = sess2.compound(link_op)
+    check(res)
+
+    completed = cb.wait(2)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != link_name:
+        fail("Wrong entry name in ADD notification")
+
+def testDirDelegSameClientNoNotify(t, env):
+    """Verify delegation holder's own changes don't trigger notifications
+
+    Per RFC 8881bis Section 16.2.11.2, order-unaware clients should not
+    receive notifications for changes they made themselves.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG20
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    # Create a file from the delegation-holding session itself
+    open_stateid, file_fh = _create_open(sess1, topdir + [env.testname(t)])
+
+    # Wait briefly -- should NOT get any callback
+    completed = cb.wait(2)
+
+    ops = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(ops)
+    check(res)
+
+    close_file(sess1, file_fh, stateid=open_stateid)
+
+    if cb.got_recall:
+        fail("Got CB_RECALL for delegation holder's own change")
+    # RFC 8881 requires this notification; the bis draft withholds it
+    # only when the server uses the order-agnostic format.
+    if cb.got_notify:
+        t.pass_warn("Got CB_NOTIFY for delegation holder's own change")
+
+def testDirDelegCrossRenameOver(t, env):
+    """Verify cross-directory rename-over reports overwritten entry in nad_old_entry
+
+    Per RFC 8881 Section 18.26.4, when a cross-directory rename
+    overwrites an existing file in the target directory, a
+    NOTIFY4_ADD_ENTRY is generated.  When the removal is done
+    atomically with the rename, a separate NOTIFY4_REMOVE_ENTRY
+    notification will not be generated.  Instead, the deletion of the
+    file will be reported as part of the NOTIFY4_ADD_ENTRY notification
+    via nad_old_entry.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG21
+    """
+    c = env.c1
+    cb = threading.Event()
+
+    # Get a dir delegation on the target directory
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_ADD_ENTRY,
+                                      NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb)
+
+    topdir = c.homedir + [t.code.encode('utf8')]
+
+    # Create a file in the delegated directory (will be renamed over)
+    victim_name = b"%s_victim" % env.testname(t)
+    file_fh = _create_close(sess1, topdir + [victim_name])
+
+    # Create a source directory and a file in it
+    srcdir = c.homedir + [b"%s_src" % t.code.encode('utf8')]
+    res = create_obj(sess1, srcdir)
+    check(res)
+
+    src_name = env.testname(t)
+    file_fh2 = _create_close(sess1, srcdir + [src_name], owner=b"owner2")
+
+    # Clear notification state from creates above
+    cb.reset()
+
+    # Rename the source file over the victim in the delegated dir from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    oldpath = srcdir + [src_name]
+    newpath = topdir + [victim_name]
+    res = rename_obj(sess2, oldpath, newpath)
+    check(res)
+
+    completed = cb.wait(2)
+    if completed:
+        cb.clear()
+        cb.wait(1)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    # Look for ADD notification with nad_old_entry for the overwritten file
+    evt = find_notify_event(cb, NOTIFY4_ADD_ENTRY)
+    if evt.nad_new_entry.ne_file != victim_name:
+        fail("Wrong entry name in ADD notification")
+    if len(evt.nad_old_entry) == 1:
+        if evt.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+            fail("Wrong overwritten entry name in nad_old_entry")
+    else:
+        # The removal was not atomic with the rename (RFC 8881
+        # Section 18.26.4), so the victim is reported by a REMOVE.
+        evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+        if evt.nrm_old_entry.ne_file != victim_name:
+            fail("Wrong entry name in REMOVE notification")
+
+def testDirDelegRenameOver(t, env):
+    """Verify within-directory rename-over populates nad_old_entry
+
+    Per RFC 8881bis Section 27.4.6, when a within-directory rename
+    overwrites an existing entry, the overwritten entry's info is
+    reported in nrn_new_entry.nad_old_entry.
+
+    FLAGS: dirdeleg all
+    CODE: DIRDELEG22
+    """
+    c = env.c1
+    topdir = c.homedir + [t.code.encode('utf8')]
+    cb = threading.Event()
+    sess1, fh, deleg = _getDirDeleg(t, env,
+                                     [NOTIFY4_RENAME_ENTRY,
+                                      NOTIFY4_REMOVE_ENTRY,
+                                      NOTIFY4_GFLAG_EXTEND], cb,
+                                     optional=[NOTIFY4_REMOVE_ENTRY])
+
+    # Create two files in the delegated directory from sess1
+    src_name = env.testname(t)
+    victim_name = b"%s_victim" % env.testname(t)
+    for name in [src_name, victim_name]:
+        _create_close(sess1, topdir + [name])
+
+    # Rename src over victim from sess2
+    sess2 = c.new_client_session(b"%s_2" % env.testname(t))
+    rename_op = [ op.putfh(fh), op.savefh(),
+                  op.putfh(fh),
+                  op.rename(src_name, victim_name) ]
+    res = sess2.compound(rename_op)
+    check(res)
+
+    completed = cb.wait(2)
+    if completed:
+        cb.clear()
+        cb.wait(1)
+
+    delegreturn_op = [ op.putfh(fh), op.delegreturn(deleg) ]
+    res = sess1.compound(delegreturn_op)
+    check(res)
+
+    if (not completed or not cb.got_notify):
+        fail("Didn't receive a CB_NOTIFY from the server!")
+
+    evt = find_notify_event(cb, NOTIFY4_RENAME_ENTRY)
+    if evt.nrn_old_entry.nrm_old_entry.ne_file != src_name:
+        fail("Wrong old entry name in RENAME notification")
+    if evt.nrn_new_entry.nad_new_entry.ne_file != victim_name:
+        fail("Wrong new entry name in RENAME notification")
+    if len(evt.nrn_new_entry.nad_old_entry) == 1:
+        if evt.nrn_new_entry.nad_old_entry[0].nrm_old_entry.ne_file != victim_name:
+            fail("Wrong overwritten entry name in nad_old_entry")
+    else:
+        # The removal was not atomic with the rename (RFC 8881
+        # Section 18.26.4), so the victim is reported by a REMOVE.
+        if NOTIFY4_REMOVE_ENTRY not in nfs4lib.bitmap2list(cb.granted):
+            fail("Overwritten entry not in nad_old_entry and "
+                 "REMOVE_ENTRY notifications not granted")
+        evt = find_notify_event(cb, NOTIFY4_REMOVE_ENTRY)
+        if evt.nrm_old_entry.ne_file != victim_name:
+            fail("Wrong entry name in REMOVE notification")
