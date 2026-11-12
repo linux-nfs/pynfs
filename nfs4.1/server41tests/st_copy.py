@@ -20,6 +20,17 @@ def _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    count, consecutive, synchronous, [])]
     return sess.compound(ops)
 
+def _check_sync_copy(t, res):
+    """check the result of a COPY that required a synchronous copy
+
+    RFC 7862 Section 15.2.3: a destination server that cannot meet the
+    requirement MUST return NFS4ERR_OFFLOAD_NO_REQS.  Such a server is
+    conformant, so report the test as unsupported instead of failed.
+    """
+    check(res, [NFS4_OK, NFS4ERR_OFFLOAD_NO_REQS])
+    if res.status == NFS4ERR_OFFLOAD_NO_REQS:
+        t.fail_support("server cannot perform a synchronous COPY")
+
 def _poll_offload_status(sess, dst_fh, copy_stateid, timeout=120):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -100,12 +111,13 @@ def testSyncCopy(t, env):
 
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    count=len(data), synchronous=1)
-    check(res)
+    _check_sync_copy(t, res)
     cr = res.resarray[-1]
 
-    # A synchronous COPY was requested, but RFC 7862 permits the server to
-    # perform the copy asynchronously anyway; cr_requirements.cr_synchronous
-    # reports what actually happened.  Honor either, but verify the byte count.
+    # RFC 7862 requires NFS4ERR_OFFLOAD_NO_REQS from a server that cannot
+    # copy synchronously.  Still honor an NFS4_OK reply that reports an
+    # asynchronous copy through cr_requirements.cr_synchronous, and verify
+    # the byte count either way.
     if cr.cr_resok4.cr_requirements.cr_synchronous:
         if cr.cr_response.wr_count != len(data):
             fail("Synchronous copy expected %d bytes, got %d" %
@@ -137,7 +149,7 @@ def testCopyWithOffset(t, env):
 
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    src_offset=1024, dst_offset=512, count=4096, synchronous=1)
-    check(res)
+    _check_sync_copy(t, res)
     cr = res.resarray[-1]
     if cr.cr_response.wr_count != 4096:
         fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
@@ -201,7 +213,7 @@ def testZeroLengthCopy(t, env):
     copy = [op.putfh(fh), op.savefh(), op.putfh(fh2),
             op.copy(stateid, stateid2, 0, 0, 0, 0, 1, [])]
     res = sess1.compound(copy)
-    check(res)
+    _check_sync_copy(t, res)
     l = res.resarray[-1].cr_response.wr_count
     if l != len(data):
         fail("Copy to end of %d-byte file copied %d bytes" % (len(data), l))
@@ -342,7 +354,7 @@ def testCopyToSameFile(t, env):
 
     res = _do_copy(sess, fh, stateid, fh, stateid,
                    src_offset=0, dst_offset=8192, count=4096, synchronous=1)
-    check(res)
+    _check_sync_copy(t, res)
     cr = res.resarray[-1]
     if cr.cr_response.wr_count != 4096:
         fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
