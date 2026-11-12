@@ -3090,6 +3090,7 @@ struct ff_device_addr4 {
 const FF_FLAGS_NO_LAYOUTCOMMIT   = 0x00000001;
 const FF_FLAGS_NO_IO_THRU_MDS    = 0x00000002;
 const FF_FLAGS_NO_READ_IO        = 0x00000004;
+const FF_FLAGS_WRITE_ONE_MIRROR  = 0x00000008;
 typedef uint32_t            ff_flags4;
 
 struct ff_data_server4 {
