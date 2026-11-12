@@ -31,6 +31,15 @@ def _check_sync_copy(t, res):
     if res.status == NFS4ERR_OFFLOAD_NO_REQS:
         t.fail_support("server cannot perform a synchronous COPY")
 
+def _is_async(cr):
+    """True if the COPY reply describes an asynchronous copy
+
+    RFC 7862 Section 15.2.3: a returned wr_callback_id indicates an
+    asynchronous copy, and no wr_callback_id means the copy completed
+    synchronously.
+    """
+    return len(cr.cr_response.wr_callback_id) > 0
+
 def _poll_offload_status(sess, dst_fh, copy_stateid, timeout=120):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -116,9 +125,9 @@ def testSyncCopy(t, env):
 
     # RFC 7862 requires NFS4ERR_OFFLOAD_NO_REQS from a server that cannot
     # copy synchronously.  Still honor an NFS4_OK reply that reports an
-    # asynchronous copy through cr_requirements.cr_synchronous, and verify
-    # the byte count either way.
-    if cr.cr_resok4.cr_requirements.cr_synchronous:
+    # asynchronous copy through wr_callback_id, and verify the byte count
+    # either way.
+    if not _is_async(cr):
         if cr.cr_response.wr_count != len(data):
             fail("Synchronous copy expected %d bytes, got %d" %
                  (len(data), cr.cr_response.wr_count))
@@ -178,7 +187,7 @@ def testAsyncCopy(t, env):
     check(res)
     cr = res.resarray[-1]
 
-    if not cr.cr_resok4.cr_requirements.cr_synchronous:
+    if _is_async(cr):
         copy_stateid = cr.cr_response.wr_callback_id[0]
         status = _poll_offload_status(sess, dst_fh, copy_stateid)
         if status.osr_complete[0] != NFS4_OK:
@@ -243,11 +252,9 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
     check(res)
     cr = res.resarray[-1]
 
-    if cr.cr_resok4.cr_requirements.cr_synchronous:
-        if cr.cr_response.wr_count != len(data):
-            fail("Sync copy returned %d bytes, expected %d" %
-                 (cr.cr_response.wr_count, len(data)))
-        return
+    if not _is_async(cr):
+        t.fail_support("server completed the copy synchronously, so there "
+                       "is no copy stateid to query")
 
     copy_stateid = cr.cr_response.wr_callback_id[0]
     status = _poll_offload_status(sess, dst_fh, copy_stateid)
@@ -286,7 +293,7 @@ def testOffloadCancel(t, env):
     check(res)
     cr = res.resarray[-1]
 
-    if cr.cr_resok4.cr_requirements.cr_synchronous:
+    if not _is_async(cr):
         return
 
     copy_stateid = cr.cr_response.wr_callback_id[0]
@@ -529,7 +536,7 @@ def testInterServerCopy(t, env):
                        "(%s)" % nfsstat4[res.status])
     cr = res.resarray[-1]
 
-    if cr.cr_resok4.cr_requirements.cr_synchronous:
+    if not _is_async(cr):
         if cr.cr_response.wr_count != len(data):
             fail("Inter-server copy expected %d bytes, got %d" %
                  (len(data), cr.cr_response.wr_count))
