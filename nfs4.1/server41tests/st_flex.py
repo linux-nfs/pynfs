@@ -1121,6 +1121,9 @@ def testFlexLayoutReturn100(t, env):
 def testFlexFlags(t, env):
     """Verify ffl_flags contains only valid RFC 8435 bits.
 
+    The flags are checked in both a READ and a RW layout. A bit outside
+    the set RFC 8435 defines produces a warning, not a failure.
+
     FLAGS: flex
     CODE: FFFL1
     """
@@ -1132,36 +1135,57 @@ def testFlexFlags(t, env):
     fh = res.resarray[-1].object
     open_stateid = res.resarray[-2].stateid
 
-    # LAYOUTGET
-    ops = [op.putfh(fh),
-           op.layoutget(False, LAYOUT4_FLEX_FILES, LAYOUTIOMODE4_RW,
-                        0, 8192, 8192, open_stateid, 0xffff)]
-    res = sess.compound(ops)
-    check(res)
-    lo_stateid = res.resarray[-1].logr_stateid
+    flags_seen = []
+    no_layout = None
+    for iomode in (LAYOUTIOMODE4_READ, LAYOUTIOMODE4_RW):
+        # LAYOUTGET
+        ops = [op.putfh(fh),
+               op.layoutget(False, LAYOUT4_FLEX_FILES, iomode,
+                            0, 8192, 8192, open_stateid, 0xffff)]
+        res = sess.compound(ops)
+        check(res)
+        lo_stateid = res.resarray[-1].logr_stateid
+        layouts = res.resarray[-1].logr_layout
 
-    # Unpack ff_layout4 and check ffl_flags
-    layout = res.resarray[-1].logr_layout[-1]
-    p = FlexUnpacker(layout.loc_body)
-    opaque = p.unpack_ff_layout4()
+        # Unpack each ff_layout4 and record its ffl_flags
+        for layout in layouts:
+            p = FlexUnpacker(layout.loc_body)
+            opaque = p.unpack_ff_layout4()
+            p.done()
+            flags_seen.append((iomode, opaque.ffl_flags))
+        if not layouts:
+            # Nothing to return
+            if no_layout is None:
+                no_layout = iomode
+            continue
 
-    valid_flags = (FF_FLAGS_NO_LAYOUTCOMMIT |
-                   FF_FLAGS_NO_IO_THRU_MDS |
-                   FF_FLAGS_NO_READ_IO)
-    if opaque.ffl_flags & ~valid_flags:
-        t.fail("ffl_flags 0x%x has undefined bits set (valid: 0x%x)"
-               % (opaque.ffl_flags, valid_flags))
-
-    # LAYOUTRETURN
-    ops = [op.putfh(fh),
-           op.layoutreturn(False, LAYOUT4_FLEX_FILES, LAYOUTIOMODE4_ANY,
-                           layoutreturn4(LAYOUTRETURN4_FILE,
-                                         layoutreturn_file4(0, NFS4_MAXFILELEN,
-                                                            lo_stateid,
-                                                            empty_p.get_buffer())))]
-    res = sess.compound(ops)
-    check(res)
+        # LAYOUTRETURN
+        ops = [op.putfh(fh),
+               op.layoutreturn(False, LAYOUT4_FLEX_FILES, LAYOUTIOMODE4_ANY,
+                               layoutreturn4(LAYOUTRETURN4_FILE,
+                                             layoutreturn_file4(0, NFS4_MAXFILELEN,
+                                                                lo_stateid,
+                                                                empty_p.get_buffer())))]
+        res = sess.compound(ops)
+        check(res)
 
     # Close file
     res = close_file(sess, fh, stateid=open_stateid)
     check(res)
+
+    if no_layout is not None:
+        fail("LAYOUTGET returned NFS4_OK with no layout (iomode %i)"
+             % no_layout)
+
+    # RFC 8435 does not require unassigned bits to be zero, so a server
+    # that sets one is not necessarily wrong. A flag defined after this
+    # test was written would trip the check, hence a warning.
+    valid_flags = (FF_FLAGS_NO_LAYOUTCOMMIT |
+                   FF_FLAGS_NO_IO_THRU_MDS |
+                   FF_FLAGS_NO_READ_IO |
+                   FF_FLAGS_WRITE_ONE_MIRROR)
+    bad = ["iomode %i: 0x%x" % (iomode, flags)
+           for iomode, flags in flags_seen if flags & ~valid_flags]
+    if bad:
+        t.pass_warn("ffl_flags has bits outside RFC 8435 (defined: 0x%x): %s"
+                    % (valid_flags, ", ".join(bad)))
