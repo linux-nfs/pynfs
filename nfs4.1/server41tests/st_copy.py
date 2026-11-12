@@ -206,8 +206,9 @@ def testZeroLengthCopy(t, env):
     fh = res.resarray[-1].object
     stateid = res.resarray[-2].stateid
     data = b"write test data"
-    res = write_file(sess1, fh, data, 0, stateid)
+    _write_data(sess1, fh, stateid, data)
     res = create_file(sess1, env.testname(t)+b"_copy")
+    check(res)
     fh2 = res.resarray[-1].object
     stateid2 = res.resarray[-2].stateid
     copy = [op.putfh(fh), op.savefh(), op.putfh(fh2),
@@ -304,7 +305,7 @@ def testCopyBadSourceStateid(t, env):
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
-    write_file(sess, src_fh, b"data" * 256, 0, src_stateid)
+    _write_data(sess, src_fh, src_stateid, b"data" * 256)
     dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
     res = _do_copy(sess, src_fh, _bad_stateid(), dst_fh, dst_stateid,
@@ -320,7 +321,7 @@ def testCopyBadDestStateid(t, env):
     """
     sess = env.c1.new_client_session(env.testname(t))
     src_fh, src_stateid = _create_and_open(sess, env.testname(t))
-    write_file(sess, src_fh, b"data", 0, src_stateid)
+    _write_data(sess, src_fh, src_stateid, b"data")
     dst_fh, _dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, _bad_stateid(),
@@ -351,7 +352,7 @@ def testCopyToSameFile(t, env):
     sess = env.c1.new_client_session(env.testname(t))
     fh, stateid = _create_and_open(sess, env.testname(t))
     data = b"F" * 4096
-    write_file(sess, fh, data, 0, stateid)
+    _write_data(sess, fh, stateid, data)
 
     res = _do_copy(sess, fh, stateid, fh, stateid,
                    src_offset=0, dst_offset=8192, count=4096, synchronous=1)
