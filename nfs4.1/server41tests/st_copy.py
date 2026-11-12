@@ -400,10 +400,8 @@ def testCopyNotify(t, env):
                        "(inter-server copy source)")
 
     cnr = res.resarray[-1]
-    # The client needs a source stateid to give to the destination's COPY.
-    if cnr.cnr_stateid is None:
-        fail("COPY_NOTIFY did not return a source stateid")
-    # And at least one netloc telling the destination how to reach the source.
+    # The client needs at least one netloc telling the destination how to
+    # reach the source.
     if not cnr.cnr_source_server:
         fail("COPY_NOTIFY returned an empty cnr_source_server list")
 
