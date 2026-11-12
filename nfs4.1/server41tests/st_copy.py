@@ -303,7 +303,8 @@ def testCopyBadSourceStateid(t, env):
     VERS: 2-
     """
     sess = env.c1.new_client_session(env.testname(t))
-    src_fh, _src_stateid = _create_and_open(sess, env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    write_file(sess, src_fh, b"data" * 256, 0, src_stateid)
     dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
     res = _do_copy(sess, src_fh, _bad_stateid(), dst_fh, dst_stateid,
