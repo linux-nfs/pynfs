@@ -22,7 +22,7 @@ setup(name = "xdrgen",
       author = "Fred Isaman",
       author_email = "iisaman@citi.umich.edu",
       maintainer = "Calum Mackay",
-      maintainer_email = "calum.mackay@oracle.com",
+      maintainer_email = "calum.mackay@cdmnet.org",
       url = "https://github.com/linux-nfs/pynfs",
       license = "GPL"
       )
