@@ -109,6 +109,8 @@ def _write_data(sess, fh, stateid, data, offset=0):
     while pos < len(data):
         res = write_file(sess, fh, data[pos:pos + chunk], offset + pos, stateid)
         check(res, msg="WRITE at offset %d" % (offset + pos))
+        if res.count == 0:
+            fail("WRITE at offset %d wrote no data" % (offset + pos))
         pos += res.count
 
 def _verify_data(sess, fh, stateid, data, offset=0):
