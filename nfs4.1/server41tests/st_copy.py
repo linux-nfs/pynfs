@@ -291,7 +291,8 @@ def testOffloadCancel(t, env):
     cr = res.resarray[-1]
 
     if not _is_async(cr):
-        return
+        t.fail_support("server completed the copy synchronously, so there "
+                       "is no copy to cancel")
 
     copy_stateid = cr.cr_response.wr_callback_id[0]
 
