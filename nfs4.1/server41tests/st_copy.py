@@ -349,8 +349,14 @@ def testOffloadStatusNoState(t, env):
     res = sess.compound(ops)
     check(res, NFS4ERR_BAD_STATEID, msg="OFFLOAD_STATUS with bad stateid")
 
-def testCopyToSameFile(t, env):
-    """copy within the same file to non-overlapping region
+def testCopySameFile(t, env):
+    """COPY with the same source and destination file must fail
+
+    RFC 7862 Section 15.2.3: if SAVED_FH and CURRENT_FH refer to the
+    same file, COPY MUST fail with NFS4ERR_INVAL, whether or not the
+    ranges overlap (unlike CLONE, which only forbids overlap).  The
+    copy is asynchronous so NFS4ERR_OFFLOAD_NO_REQS is not a valid
+    alternative.
 
     FLAGS: copy
     CODE: COPY11
@@ -358,20 +364,11 @@ def testCopyToSameFile(t, env):
     """
     sess = env.c1.new_client_session(env.testname(t))
     fh, stateid = _create_and_open(sess, env.testname(t))
-    data = b"F" * 4096
-    _write_data(sess, fh, stateid, data)
+    _write_data(sess, fh, stateid, b"F" * 4096)
 
     res = _do_copy(sess, fh, stateid, fh, stateid,
-                   src_offset=0, dst_offset=8192, count=4096, synchronous=1)
-    _check_sync_copy(t, res)
-    cr = res.resarray[-1]
-    if cr.cr_response.wr_count != 4096:
-        fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
-
-    res = read_file(sess, fh, 8192, 4096, stateid)
-    check(res)
-    if res.data != data:
-        fail("Same-file copy: data at offset 8192 does not match source")
+                   src_offset=0, dst_offset=8192, count=4096, synchronous=0)
+    check(res, NFS4ERR_INVAL, msg="COPY with SAVED_FH == CURRENT_FH")
 
 def testCopyNotify(t, env):
     """COPY_NOTIFY authorizes a destination server to copy from the source
