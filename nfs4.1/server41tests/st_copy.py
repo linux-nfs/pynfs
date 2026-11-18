@@ -518,8 +518,10 @@ def testInterServerCopy(t, env):
     ops = _inter_copy_ops(src_fh, copy_src_stateid, dst_fh, dst_stateid,
                           source_server, count=len(data), synchronous=0)
     res = dst_sess.compound(ops)
+    # No ca_consecutive or ca_synchronous requirement is set, so
+    # NFS4ERR_OFFLOAD_NO_REQS is not a valid refusal here.
     refusals = [NFS4ERR_NOTSUPP, NFS4ERR_OFFLOAD_DENIED,
-                NFS4ERR_PARTNER_NOTSUPP, NFS4ERR_OFFLOAD_NO_REQS]
+                NFS4ERR_PARTNER_NOTSUPP]
     check(res, [NFS4_OK] + refusals, msg="inter-server COPY")
     if res.status in refusals:
         t.fail_support("Destination server does not support inter-server COPY "
