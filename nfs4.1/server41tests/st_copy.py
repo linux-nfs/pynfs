@@ -52,6 +52,27 @@ def _poll_offload_status(sess, dst_fh, copy_stateid, timeout=120):
         time.sleep(1)
     fail("OFFLOAD_STATUS did not complete within %d seconds" % timeout)
 
+def _copy_count(sess, dst_fh, cr):
+    """return the byte count of a successful COPY
+
+    A reply with wr_callback_id describes an asynchronous copy: poll
+    OFFLOAD_STATUS until it completes and return osr_count.  Otherwise
+    the copy completed synchronously and wr_count holds the result.
+
+    This also honors an asynchronous reply to a COPY that set
+    ca_synchronous.  RFC 7862 Section 15.2.3 wants NFS4ERR_OFFLOAD_NO_REQS
+    there instead, but checking the copy itself is more useful than
+    failing on that.
+    """
+    if not _is_async(cr):
+        return cr.cr_response.wr_count
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+    status = _poll_offload_status(sess, dst_fh, copy_stateid)
+    if status.osr_complete[0] != NFS4_OK:
+        fail("Async copy completed with error: %s" %
+             nfsstat4.get(status.osr_complete[0], status.osr_complete[0]))
+    return status.osr_count
+
 def _create_and_open(sess, name):
     res = create_file(sess, name)
     check(res)
@@ -121,24 +142,9 @@ def testSyncCopy(t, env):
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    count=len(data), synchronous=1)
     _check_sync_copy(t, res)
-    cr = res.resarray[-1]
-
-    # RFC 7862 requires NFS4ERR_OFFLOAD_NO_REQS from a server that cannot
-    # copy synchronously.  Still honor an NFS4_OK reply that reports an
-    # asynchronous copy through wr_callback_id, and verify the byte count
-    # either way.
-    if not _is_async(cr):
-        if cr.cr_response.wr_count != len(data):
-            fail("Synchronous copy expected %d bytes, got %d" %
-                 (len(data), cr.cr_response.wr_count))
-    else:
-        copy_stateid = cr.cr_response.wr_callback_id[0]
-        status = _poll_offload_status(sess, dst_fh, copy_stateid)
-        if status.osr_complete[0] != NFS4_OK:
-            fail("Async copy completed with error: %d" % status.osr_complete[0])
-        if status.osr_count != len(data):
-            fail("Expected %d bytes copied, got %d" %
-                 (len(data), status.osr_count))
+    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    if count != len(data):
+        fail("Expected to copy %d bytes, got %d" % (len(data), count))
 
     _verify_data(sess, dst_fh, dst_stateid, data)
 
@@ -159,9 +165,9 @@ def testCopyWithOffset(t, env):
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    src_offset=1024, dst_offset=512, count=4096, synchronous=1)
     _check_sync_copy(t, res)
-    cr = res.resarray[-1]
-    if cr.cr_response.wr_count != 4096:
-        fail("Expected to copy 4096 bytes, got %d" % cr.cr_response.wr_count)
+    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    if count != 4096:
+        fail("Expected to copy 4096 bytes, got %d" % count)
 
     res = read_file(sess, dst_fh, 512, 4096, dst_stateid)
     check(res)
@@ -185,20 +191,9 @@ def testAsyncCopy(t, env):
     res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
                    count=len(data), synchronous=0)
     check(res)
-    cr = res.resarray[-1]
-
-    if _is_async(cr):
-        copy_stateid = cr.cr_response.wr_callback_id[0]
-        status = _poll_offload_status(sess, dst_fh, copy_stateid)
-        if status.osr_complete[0] != NFS4_OK:
-            fail("Async copy completed with error: %d" % status.osr_complete[0])
-        if status.osr_count != len(data):
-            fail("Expected %d bytes copied, got %d" %
-                 (len(data), status.osr_count))
-    else:
-        if cr.cr_response.wr_count != len(data):
-            fail("Sync copy returned %d bytes, expected %d" %
-                 (cr.cr_response.wr_count, len(data)))
+    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    if count != len(data):
+        fail("Expected to copy %d bytes, got %d" % (len(data), count))
 
     _verify_data(sess, dst_fh, dst_stateid, data)
 
@@ -224,7 +219,7 @@ def testZeroLengthCopy(t, env):
             op.copy(stateid, stateid2, 0, 0, 0, 0, 1, [])]
     res = sess1.compound(copy)
     _check_sync_copy(t, res)
-    l = res.resarray[-1].cr_response.wr_count
+    l = _copy_count(sess1, fh2, res.resarray[-1])
     if l != len(data):
         fail("Copy to end of %d-byte file copied %d bytes" % (len(data), l))
 
@@ -529,19 +524,9 @@ def testInterServerCopy(t, env):
     if res.status in refusals:
         t.fail_support("Destination server does not support inter-server COPY "
                        "(%s)" % nfsstat4[res.status])
-    cr = res.resarray[-1]
-
-    if not _is_async(cr):
-        if cr.cr_response.wr_count != len(data):
-            fail("Inter-server copy expected %d bytes, got %d" %
-                 (len(data), cr.cr_response.wr_count))
-    else:
-        copy_stateid = cr.cr_response.wr_callback_id[0]
-        status = _poll_offload_status(dst_sess, dst_fh, copy_stateid)
-        if status.osr_complete[0] != NFS4_OK:
-            fail("Async inter-server copy error: %d" % status.osr_complete[0])
-        if status.osr_count != len(data):
-            fail("Expected %d bytes copied, got %d" %
-                 (len(data), status.osr_count))
+    count = _copy_count(dst_sess, dst_fh, res.resarray[-1])
+    if count != len(data):
+        fail("Inter-server copy expected %d bytes, got %d" %
+             (len(data), count))
 
     _verify_data(dst_sess, dst_fh, dst_stateid, data)
