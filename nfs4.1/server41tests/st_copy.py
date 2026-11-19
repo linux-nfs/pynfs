@@ -247,10 +247,13 @@ def testZeroLengthCopy(t, env):
 def testAsyncCopyOffloadStatusAfterComplete(t, env):
     """verify OFFLOAD_STATUS works after async copy completes
 
-    The server should keep copy state around for a TTL window after
-    completion so clients can query final status.  This catches the
-    inverted TTL check bug where the reaper destroys the state on
-    the first tick instead of the last.
+    RFC 7862 Section 4.8: the copy stateid stays valid until the client
+    replies to CB_OFFLOAD (or sends OFFLOAD_CANCEL), so OFFLOAD_STATUS
+    must keep working after the copy completes until then.  Once the
+    client has replied, the server may free it, and the test is reported
+    as unsupported.  The pause before the re-query gives a server that
+    discards completed copies too early (such as the Linux reaper with
+    an inverted TTL check) a chance to do so.
 
     FLAGS: copy
     CODE: COPY6
@@ -279,6 +282,10 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
     time.sleep(5)
 
     res = _offload_status(sess, dst_fh, copy_stateid)
+    if (res.status == NFS4ERR_BAD_STATEID and
+            copy_stateid.other in sess.c.cb_offload):
+        t.fail_support("server freed the copy stateid after the client "
+                       "replied to CB_OFFLOAD")
     check(res, msg="OFFLOAD_STATUS after completion should still succeed")
     recheck = res.resarray[-1]
     if not recheck.osr_complete:
