@@ -164,6 +164,9 @@ class Environment(testmod.Environment):
                                              client.default_vers)
             cred = AuthGss().init_cred(call, target="nfs@%s" % server_host)
             cred.service = self.opts.service
+        else:
+            raise ValueError("unsupported security flavor %r" %
+                             self.opts.flavor)
         client.set_cred(cred)
         return cred
 
