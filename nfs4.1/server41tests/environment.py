@@ -197,12 +197,8 @@ class Environment(testmod.Environment):
         clean_dir(sess, home)
         sess.c.null()
 
-    def _maketree(self, sess, path=None, home=None):
+    def _maketree(self, sess, path, home):
         """Make test tree"""
-        if path is None:
-            path = self.opts.path
-        if home is None:
-            home = self.opts.home
         # ensure /tmp (and path leading up) exists
         p = []
         for comp in home:
