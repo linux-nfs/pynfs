@@ -297,6 +297,11 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
 def testOffloadCancel(t, env):
     """start an async copy and cancel it with OFFLOAD_CANCEL
 
+    RFC 7862 Section 4.1.2: a server whose COPY returns a stateid MUST
+    support OFFLOAD_CANCEL.  A successful cancel returns the copy stateid
+    (Section 4.8), so OFFLOAD_STATUS must then either reject it or
+    report the copy complete.
+
     FLAGS: copy
     CODE: COPY7
     VERS: 2-
@@ -321,8 +326,16 @@ def testOffloadCancel(t, env):
 
     ops = [op.putfh(dst_fh), op.offload_cancel(copy_stateid)]
     res = sess.compound(ops)
-    check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_COMPLETE_ALREADY],
-          msg="OFFLOAD_CANCEL")
+    check(res, [NFS4_OK, NFS4ERR_COMPLETE_ALREADY], msg="OFFLOAD_CANCEL")
+    if res.status == NFS4ERR_COMPLETE_ALREADY:
+        return
+
+    res = _offload_status(sess, dst_fh, copy_stateid)
+    check(res, [NFS4_OK, NFS4ERR_BAD_STATEID],
+          msg="OFFLOAD_STATUS after OFFLOAD_CANCEL")
+    if res.status == NFS4_OK and not res.resarray[-1].osr_complete:
+        fail("OFFLOAD_STATUS reports the copy still running after "
+             "OFFLOAD_CANCEL")
 
 def testCopyBadSourceStateid(t, env):
     """COPY with an invalid source stateid should fail
