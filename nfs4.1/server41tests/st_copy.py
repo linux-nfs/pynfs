@@ -160,9 +160,21 @@ def _server_netloc(env):
     netid = b'tcp6' if family == socket.AF_INET6 else b'tcp'
     return netloc4(NL4_NETADDR, nl_addr=netaddr4(netid, uaddr.encode('ascii')))
 
+# Room left in each request or reply for the RPC and COMPOUND headers and
+# the SEQUENCE, PUTFH and READ/WRITE ops around the data.  A generous
+# estimate: these come to a few hundred bytes.
+_IO_HEADROOM = 1024
+
+def _io_chunk(maxsize):
+    """bytes of data that fit in one READ or WRITE, given the session size"""
+    chunk = maxsize - _IO_HEADROOM
+    if chunk <= 0:
+        fail("session size %d leaves no room for READ/WRITE data" % maxsize)
+    return chunk
+
 def _write_data(sess, fh, stateid, data, offset=0):
     """Write data in chunks bounded by the session's max request size."""
-    chunk = sess.fore_channel.maxrequestsize - 1024
+    chunk = _io_chunk(sess.fore_channel.maxrequestsize)
     pos = 0
     while pos < len(data):
         res = write_file(sess, fh, data[pos:pos + chunk], offset + pos, stateid)
@@ -173,7 +185,7 @@ def _write_data(sess, fh, stateid, data, offset=0):
 
 def _verify_data(sess, fh, stateid, data, offset=0):
     """Read back and compare data in chunks bounded by max response size."""
-    chunk = sess.fore_channel.maxresponsesize - 1024
+    chunk = _io_chunk(sess.fore_channel.maxresponsesize)
     pos = 0
     while pos < len(data):
         res = read_file(sess, fh, offset + pos, min(chunk, len(data) - pos),
