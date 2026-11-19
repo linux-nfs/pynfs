@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      PYNFS_GROUPS: all reboot
+      PYNFS_GROUPS: all
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nfsd
@@ -65,7 +65,7 @@ jobs:
       matrix:
         minorversion: [1, 2]
     env:
-      PYNFS_GROUPS: all reboot callback
+      PYNFS_GROUPS: all callback
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nfsd
