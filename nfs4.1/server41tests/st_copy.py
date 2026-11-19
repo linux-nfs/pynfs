@@ -40,24 +40,48 @@ def _is_async(cr):
     """
     return len(cr.cr_response.wr_callback_id) > 0
 
-def _poll_offload_status(sess, dst_fh, copy_stateid, timeout=120):
+def _errname(status):
+    return nfsstat4.get(status, status)
+
+def _offload_status(sess, dst_fh, copy_stateid):
+    return sess.compound([op.putfh(dst_fh), op.offload_status(copy_stateid)])
+
+def _wait_for_copy(sess, dst_fh, copy_stateid, timeout=120):
+    """wait for an asynchronous copy to finish and return its byte count
+
+    Polls OFFLOAD_STATUS, and fails if the copy completed with an error.
+    RFC 7862 Section 4.8 lets the server free the copy stateid once the
+    client has replied to CB_OFFLOAD, so NFS4ERR_BAD_STATEID after that
+    takes the result from the CB_OFFLOAD instead.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        ops = [op.putfh(dst_fh), op.offload_status(copy_stateid)]
-        res = sess.compound(ops)
-        check(res)
+        res = _offload_status(sess, dst_fh, copy_stateid)
+        if res.status == NFS4ERR_BAD_STATEID:
+            info = sess.c.cb_offload.get(copy_stateid.other)
+            if info is None:
+                fail("OFFLOAD_STATUS returned NFS4ERR_BAD_STATEID before "
+                     "the client replied to CB_OFFLOAD")
+            if info.coa_status != NFS4_OK:
+                fail("Async copy completed with error: %s" %
+                     _errname(info.coa_status))
+            return info.coa_resok4.wr_count
+        check(res, msg="OFFLOAD_STATUS")
         status_res = res.resarray[-1]
         if status_res.osr_complete:
-            return status_res
+            if status_res.osr_complete[0] != NFS4_OK:
+                fail("Async copy completed with error: %s" %
+                     _errname(status_res.osr_complete[0]))
+            return status_res.osr_count
         time.sleep(1)
     fail("OFFLOAD_STATUS did not complete within %d seconds" % timeout)
 
 def _copy_count(sess, dst_fh, cr):
     """return the byte count of a successful COPY
 
-    A reply with wr_callback_id describes an asynchronous copy: poll
-    OFFLOAD_STATUS until it completes and return osr_count.  Otherwise
-    the copy completed synchronously and wr_count holds the result.
+    A reply with wr_callback_id describes an asynchronous copy: wait for
+    it to complete and return its count.  Otherwise the copy completed
+    synchronously and wr_count holds the result.
 
     This also honors an asynchronous reply to a COPY that set
     ca_synchronous.  RFC 7862 Section 15.2.3 wants NFS4ERR_OFFLOAD_NO_REQS
@@ -66,12 +90,7 @@ def _copy_count(sess, dst_fh, cr):
     """
     if not _is_async(cr):
         return cr.cr_response.wr_count
-    copy_stateid = cr.cr_response.wr_callback_id[0]
-    status = _poll_offload_status(sess, dst_fh, copy_stateid)
-    if status.osr_complete[0] != NFS4_OK:
-        fail("Async copy completed with error: %s" %
-             nfsstat4.get(status.osr_complete[0], status.osr_complete[0]))
-    return status.osr_count
+    return _wait_for_copy(sess, dst_fh, cr.cr_response.wr_callback_id[0])
 
 def _create_and_open(sess, name):
     res = create_file(sess, name)
@@ -254,22 +273,19 @@ def testAsyncCopyOffloadStatusAfterComplete(t, env):
                        "is no copy stateid to query")
 
     copy_stateid = cr.cr_response.wr_callback_id[0]
-    status = _poll_offload_status(sess, dst_fh, copy_stateid)
-    if status.osr_complete[0] != NFS4_OK:
-        fail("Async copy completed with error: %d" % status.osr_complete[0])
+    _wait_for_copy(sess, dst_fh, copy_stateid)
 
     # Copy is done. Wait a bit then re-query -- state should still be valid.
     time.sleep(5)
 
-    ops = [op.putfh(dst_fh), op.offload_status(copy_stateid)]
-    res = sess.compound(ops)
+    res = _offload_status(sess, dst_fh, copy_stateid)
     check(res, msg="OFFLOAD_STATUS after completion should still succeed")
     recheck = res.resarray[-1]
     if not recheck.osr_complete:
         fail("OFFLOAD_STATUS lost completion status")
     if recheck.osr_complete[0] != NFS4_OK:
-        fail("OFFLOAD_STATUS completion changed to error: %d" %
-             recheck.osr_complete[0])
+        fail("OFFLOAD_STATUS completion changed to error: %s" %
+             _errname(recheck.osr_complete[0]))
 
 def testOffloadCancel(t, env):
     """start an async copy and cancel it with OFFLOAD_CANCEL
