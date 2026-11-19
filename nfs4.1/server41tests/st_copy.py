@@ -14,10 +14,17 @@ op = nfs_ops.NFS4ops()
 
 def _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
              src_offset=0, dst_offset=0, count=0,
-             consecutive=0, synchronous=1):
+             consecutive=0, synchronous=1, source_server=[]):
+    """send a single COPY
+
+    A non-empty source_server list makes this an inter-server COPY, sent
+    to the destination server.  src_fh is then the source file's
+    filehandle on the source server, which the destination treats as
+    opaque.
+    """
     ops = [op.putfh(src_fh), op.savefh(), op.putfh(dst_fh),
            op.copy(src_stateid, dst_stateid, src_offset, dst_offset,
-                   count, consecutive, synchronous, [])]
+                   count, consecutive, synchronous, source_server)]
     return sess.compound(ops)
 
 def _check_sync_copy(t, res):
@@ -92,6 +99,38 @@ def _copy_count(sess, dst_fh, cr):
         return cr.cr_response.wr_count
     return _wait_for_copy(sess, dst_fh, cr.cr_response.wr_callback_id[0])
 
+def _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid, length,
+          src_offset=0, dst_offset=0, count=None, synchronous=1,
+          source_server=[], check_reply=None):
+    """copy length bytes, and return how many were copied
+
+    A successful COPY may copy less than requested (the Linux server stops
+    a synchronous COPY at 4MB), so reissue COPY for the remainder until
+    length bytes are copied or a COPY makes no progress.
+
+    count is the first COPY's ca_count, length by default; 0 copies to
+    EOF.  check_reply(res) checks each COMPOUND reply; by default
+    _check_sync_copy() for a synchronous copy, else check().
+    """
+    if count is None:
+        count = length
+    if check_reply is None:
+        if synchronous:
+            check_reply = lambda res: _check_sync_copy(t, res)
+        else:
+            check_reply = lambda res: check(res, msg="COPY")
+    total = 0
+    while True:
+        res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                       src_offset + total, dst_offset + total, count,
+                       synchronous=synchronous, source_server=source_server)
+        check_reply(res)
+        n = _copy_count(sess, dst_fh, res.resarray[-1])
+        total += n
+        if n == 0 or total >= length:
+            return total
+        count = length - total
+
 def _create_and_open(sess, name):
     res = create_file(sess, name)
     check(res)
@@ -160,10 +199,8 @@ def testSyncCopy(t, env):
 
     dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
-    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
-                   count=len(data), synchronous=1)
-    _check_sync_copy(t, res)
-    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=1)
     if count != len(data):
         fail("Expected to copy %d bytes, got %d" % (len(data), count))
 
@@ -183,10 +220,8 @@ def testCopyWithOffset(t, env):
 
     dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
-    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
-                   src_offset=1024, dst_offset=512, count=4096, synchronous=1)
-    _check_sync_copy(t, res)
-    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid, 4096,
+                  src_offset=1024, dst_offset=512, synchronous=1)
     if count != 4096:
         fail("Expected to copy 4096 bytes, got %d" % count)
 
@@ -209,10 +244,8 @@ def testAsyncCopy(t, env):
 
     dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
 
-    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
-                   count=len(data), synchronous=0)
-    check(res)
-    count = _copy_count(sess, dst_fh, res.resarray[-1])
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=0)
     if count != len(data):
         fail("Expected to copy %d bytes, got %d" % (len(data), count))
 
@@ -236,11 +269,10 @@ def testZeroLengthCopy(t, env):
     check(res)
     fh2 = res.resarray[-1].object
     stateid2 = res.resarray[-2].stateid
-    copy = [op.putfh(fh), op.savefh(), op.putfh(fh2),
-            op.copy(stateid, stateid2, 0, 0, 0, 0, 1, [])]
-    res = sess1.compound(copy)
-    _check_sync_copy(t, res)
-    l = _copy_count(sess1, fh2, res.resarray[-1])
+    # ca_count 0 copies to EOF; any follow-up after a short copy names
+    # the remaining count.
+    l = _copy(t, sess1, fh, stateid, fh2, stateid2, len(data), count=0,
+              synchronous=1)
     if l != len(data):
         fail("Copy to end of %d-byte file copied %d bytes" % (len(data), l))
 
@@ -497,20 +529,6 @@ def testCopyNotifyNoFh(t, env):
                        "(inter-server copy source)")
     check(res, NFS4ERR_NOFILEHANDLE, msg="COPY_NOTIFY with no filehandle")
 
-def _inter_copy_ops(src_fh, src_stateid, dst_fh, dst_stateid, source_server,
-                    src_offset=0, dst_offset=0, count=0,
-                    consecutive=0, synchronous=1):
-    """COMPOUND for an inter-server COPY, sent to the destination server.
-
-    SAVED_FH is the source file's filehandle as known to the source server;
-    the destination server treats it as opaque and forwards it to the source
-    named by source_server (a non-empty ca_source_server list is what marks
-    the copy as inter-server).
-    """
-    return [op.putfh(src_fh), op.savefh(), op.putfh(dst_fh),
-            op.copy(src_stateid, dst_stateid, src_offset, dst_offset,
-                    count, consecutive, synchronous, source_server)]
-
 def testInterServerCopy(t, env):
     """server-to-server (inter-server) COPY across two servers
 
@@ -553,19 +571,19 @@ def testInterServerCopy(t, env):
 
     # COPY to the destination, naming the source via ca_source_server.
     # Inter-server copy is asynchronous on the Linux server (a synchronous
-    # request returns NFS4ERR_NOTSUPP), so ask for async and poll below.
-    ops = _inter_copy_ops(src_fh, copy_src_stateid, dst_fh, dst_stateid,
-                          source_server, count=len(data), synchronous=0)
-    res = dst_sess.compound(ops)
+    # request returns NFS4ERR_NOTSUPP), so ask for async.
     # No ca_consecutive or ca_synchronous requirement is set, so
     # NFS4ERR_OFFLOAD_NO_REQS is not a valid refusal here.
     refusals = [NFS4ERR_NOTSUPP, NFS4ERR_OFFLOAD_DENIED,
                 NFS4ERR_PARTNER_NOTSUPP]
-    check(res, [NFS4_OK] + refusals, msg="inter-server COPY")
-    if res.status in refusals:
-        t.fail_support("Destination server does not support inter-server COPY "
-                       "(%s)" % nfsstat4[res.status])
-    count = _copy_count(dst_sess, dst_fh, res.resarray[-1])
+    def check_reply(res):
+        check(res, [NFS4_OK] + refusals, msg="inter-server COPY")
+        if res.status in refusals:
+            t.fail_support("Destination server does not support "
+                           "inter-server COPY (%s)" % nfsstat4[res.status])
+    count = _copy(t, dst_sess, src_fh, copy_src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=0, source_server=source_server,
+                  check_reply=check_reply)
     if count != len(data):
         fail("Inter-server copy expected %d bytes, got %d" %
              (len(data), count))
