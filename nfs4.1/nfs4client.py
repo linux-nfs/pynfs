@@ -44,6 +44,8 @@ class NFS4Client(rpc.Client, rpc.Server):
         self.clients = {} # XXX Really, this should be per server
         self.ctrl_proc = ctrl_proc
         self.summary = summary
+        # offload_info4 from each CB_OFFLOAD, keyed by copy stateid "other"
+        self.cb_offload = {}
 
     def set_cred(self, credinfo):
         self.default_cred = credinfo
@@ -292,6 +294,17 @@ class NFS4Client(rpc.Client, rpc.Server):
     def op_cb_notify_lock(self, arg, env):
         log_cb.debug("In CB_NOTIFY_LOCK")
         self.prehook(arg, env)
+        res = self.posthook(arg, env, res=NFS4_OK)
+        return encode_status(res)
+
+    def op_cb_offload(self, arg, env):
+        log_cb.debug("In CB_OFFLOAD")
+        self.prehook(arg, env)
+        # Record the result before replying: once the client replies, the
+        # server may free the copy stateid (RFC 7862 Section 4.8), and this
+        # is then the only place the result can be found.
+        coa = arg.opcboffload
+        self.cb_offload[coa.coa_stateid.other] = coa.coa_offload_info
         res = self.posthook(arg, env, res=NFS4_OK)
         return encode_status(res)
 

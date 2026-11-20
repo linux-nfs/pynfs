@@ -21,6 +21,12 @@ def nfs3_proc_names():
     procs = [ x.lower()[skip:] for x in dir(nfs3_const) if x.startswith(pre) ]
     return procs
 
+# RFC 7863 names exactly one nfs_argop4 arm off the 'op' + lowercased
+# opname pattern: the COPY_NOTIFY args arm is opoffload_notify, while
+# its result arm is opcopy_notify.  The XDR is generated from the RFC,
+# so carry the exception here rather than in nfs4.x.
+_ARGOP_ARM = {"COPY_NOTIFY": "opoffload_notify"}
+
 class NFSops:
     def __init__(self, is_v4):
         self._is_v4 = is_v4
@@ -66,7 +72,9 @@ class NFSops:
                 if enum_name.startswith("CB_"):
                     kwargs['opcb%s' % enum_name[3:].lower()] = arg
                 else:
-                    kwargs['op%s' % enum_name.lower()] = arg
+                    arm = _ARGOP_ARM.get(enum_name,
+                                         'op%s' % enum_name.lower())
+                    kwargs[arm] = arg
 
             if enum_name.startswith("CB_"):
                 argop = self._type.nfs_cb_argop4

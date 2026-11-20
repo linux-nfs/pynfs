@@ -1,19 +1,274 @@
+import socket
+import time
+
 from .st_create_session import create_session
 from xdrdef.nfs4_const import *
 
 from .environment import check, fail, create_file, open_file, close_file
-from .environment import open_create_file_op, use_obj, write_file
+from .environment import open_create_file_op, use_obj, write_file, read_file
 from xdrdef.nfs4_type import open_owner4, openflag4, createhow4, open_claim4
 from xdrdef.nfs4_type import creatverfattr, fattr4, stateid4, locker4, lock_owner4
-from xdrdef.nfs4_type import open_to_lock_owner4
+from xdrdef.nfs4_type import open_to_lock_owner4, netloc4, netaddr4
 import nfs_ops
 op = nfs_ops.NFS4ops()
+
+def _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+             src_offset=0, dst_offset=0, count=0,
+             consecutive=0, synchronous=1, source_server=[]):
+    """send a single COPY
+
+    A non-empty source_server list makes this an inter-server COPY, sent
+    to the destination server.  src_fh is then the source file's
+    filehandle on the source server, which the destination treats as
+    opaque.
+    """
+    ops = [op.putfh(src_fh), op.savefh(), op.putfh(dst_fh),
+           op.copy(src_stateid, dst_stateid, src_offset, dst_offset,
+                   count, consecutive, synchronous, source_server)]
+    return sess.compound(ops)
+
+def _check_sync_copy(t, res):
+    """check the result of a COPY that required a synchronous copy
+
+    RFC 7862 Section 15.2.3: a destination server that cannot meet the
+    requirement MUST return NFS4ERR_OFFLOAD_NO_REQS.  Such a server is
+    conformant, so report the test as unsupported instead of failed.
+    """
+    check(res, [NFS4_OK, NFS4ERR_OFFLOAD_NO_REQS])
+    if res.status == NFS4ERR_OFFLOAD_NO_REQS:
+        t.fail_support("server cannot perform a synchronous COPY")
+
+def _is_async(cr):
+    """True if the COPY reply describes an asynchronous copy
+
+    RFC 7862 Section 15.2.3: a returned wr_callback_id indicates an
+    asynchronous copy, and no wr_callback_id means the copy completed
+    synchronously.
+    """
+    return len(cr.cr_response.wr_callback_id) > 0
+
+def _errname(status):
+    return nfsstat4.get(status, status)
+
+def _offload_status(sess, dst_fh, copy_stateid):
+    return sess.compound([op.putfh(dst_fh), op.offload_status(copy_stateid)])
+
+def _wait_for_copy(sess, dst_fh, copy_stateid, timeout=120):
+    """wait for an asynchronous copy to finish and return its byte count
+
+    Polls OFFLOAD_STATUS, and fails if the copy completed with an error.
+    RFC 7862 Section 4.8 lets the server free the copy stateid once the
+    client has replied to CB_OFFLOAD, so NFS4ERR_BAD_STATEID after that
+    takes the result from the CB_OFFLOAD instead.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        res = _offload_status(sess, dst_fh, copy_stateid)
+        if res.status == NFS4ERR_BAD_STATEID:
+            info = sess.c.cb_offload.get(copy_stateid.other)
+            if info is None:
+                fail("OFFLOAD_STATUS returned NFS4ERR_BAD_STATEID before "
+                     "the client replied to CB_OFFLOAD")
+            if info.coa_status != NFS4_OK:
+                fail("Async copy completed with error: %s" %
+                     _errname(info.coa_status))
+            return info.coa_resok4.wr_count
+        check(res, msg="OFFLOAD_STATUS")
+        status_res = res.resarray[-1]
+        if status_res.osr_complete:
+            if status_res.osr_complete[0] != NFS4_OK:
+                fail("Async copy completed with error: %s" %
+                     _errname(status_res.osr_complete[0]))
+            return status_res.osr_count
+        time.sleep(1)
+    fail("OFFLOAD_STATUS did not complete within %d seconds" % timeout)
+
+def _copy_count(sess, dst_fh, cr):
+    """return the byte count of a successful COPY
+
+    A reply with wr_callback_id describes an asynchronous copy: wait for
+    it to complete and return its count.  Otherwise the copy completed
+    synchronously and wr_count holds the result.
+
+    This also honors an asynchronous reply to a COPY that set
+    ca_synchronous.  RFC 7862 Section 15.2.3 wants NFS4ERR_OFFLOAD_NO_REQS
+    there instead, but checking the copy itself is more useful than
+    failing on that.
+    """
+    if not _is_async(cr):
+        return cr.cr_response.wr_count
+    return _wait_for_copy(sess, dst_fh, cr.cr_response.wr_callback_id[0])
+
+def _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid, length,
+          src_offset=0, dst_offset=0, count=None, synchronous=1,
+          source_server=[], check_reply=None):
+    """copy length bytes, and return how many were copied
+
+    A successful COPY may copy less than requested (the Linux server stops
+    a synchronous COPY at 4MB), so reissue COPY for the remainder until
+    length bytes are copied or a COPY makes no progress.
+
+    count is the first COPY's ca_count, length by default; 0 copies to
+    EOF.  check_reply(res) checks each COMPOUND reply; by default
+    _check_sync_copy() for a synchronous copy, else check().
+    """
+    if count is None:
+        count = length
+    if check_reply is None:
+        if synchronous:
+            check_reply = lambda res: _check_sync_copy(t, res)
+        else:
+            check_reply = lambda res: check(res, msg="COPY")
+    total = 0
+    while True:
+        res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                       src_offset + total, dst_offset + total, count,
+                       synchronous=synchronous, source_server=source_server)
+        check_reply(res)
+        n = _copy_count(sess, dst_fh, res.resarray[-1])
+        total += n
+        if n == 0 or total >= length:
+            return total
+        count = length - total
+
+def _create_and_open(sess, name):
+    res = create_file(sess, name)
+    check(res)
+    fh = res.resarray[-1].object
+    stateid = res.resarray[-2].stateid
+    return fh, stateid
+
+def _bad_stateid():
+    # A fabricated, non-special stateid (not the all-zero anonymous or
+    # all-one READ-bypass special stateids) the server cannot recognize.
+    return stateid4(1, b'\xde\xad\xbe\xef' * 3)
+
+def _server_netloc(env):
+    """netloc4 (NL4_NETADDR) naming the server under test.
+
+    The Linux server only accepts the NL4_NETADDR form of netloc4 and
+    rejects NL4_NAME / NL4_URL at decode time with NFS4ERR_BADXDR, so build
+    a universal address (RFC 1833: h.h.h.h.p1.p2) from the server address
+    and port.  For single-server COPY_NOTIFY tests this names the server
+    itself; we only need a netloc4 the source server will accept and record.
+    """
+    host, port = env.opts.server, env.opts.port
+    family, _, _, _, sockaddr = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM)[0]
+    ip = sockaddr[0]
+    uaddr = "%s.%d.%d" % (ip, (port >> 8) & 0xff, port & 0xff)
+    netid = b'tcp6' if family == socket.AF_INET6 else b'tcp'
+    return netloc4(NL4_NETADDR, nl_addr=netaddr4(netid, uaddr.encode('ascii')))
+
+# Room left in each request or reply for the RPC and COMPOUND headers and
+# the SEQUENCE, PUTFH and READ/WRITE ops around the data.  A generous
+# estimate: these come to a few hundred bytes.
+_IO_HEADROOM = 1024
+
+def _io_chunk(maxsize):
+    """bytes of data that fit in one READ or WRITE, given the session size"""
+    chunk = maxsize - _IO_HEADROOM
+    if chunk <= 0:
+        fail("session size %d leaves no room for READ/WRITE data" % maxsize)
+    return chunk
+
+def _write_data(sess, fh, stateid, data, offset=0):
+    """Write data in chunks bounded by the session's max request size."""
+    chunk = _io_chunk(sess.fore_channel.maxrequestsize)
+    pos = 0
+    while pos < len(data):
+        res = write_file(sess, fh, data[pos:pos + chunk], offset + pos, stateid)
+        check(res, msg="WRITE at offset %d" % (offset + pos))
+        if res.count == 0:
+            fail("WRITE at offset %d wrote no data" % (offset + pos))
+        pos += res.count
+
+def _verify_data(sess, fh, stateid, data, offset=0):
+    """Read back and compare data in chunks bounded by max response size."""
+    chunk = _io_chunk(sess.fore_channel.maxresponsesize)
+    pos = 0
+    while pos < len(data):
+        res = read_file(sess, fh, offset + pos, min(chunk, len(data) - pos),
+                        stateid)
+        check(res)
+        if not res.data:
+            fail("Short read at offset %d" % (offset + pos))
+        if res.data != data[pos:pos + len(res.data)]:
+            fail("Data mismatch at offset %d" % (offset + pos))
+        pos += len(res.data)
+
+def testSyncCopy(t, env):
+    """synchronous copy of a file and verify contents
+
+    FLAGS: copy
+    CODE: COPY1
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"A" * 65536
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=1)
+    if count != len(data):
+        fail("Expected to copy %d bytes, got %d" % (len(data), count))
+
+    _verify_data(sess, dst_fh, dst_stateid, data)
+
+def testCopyWithOffset(t, env):
+    """copy with non-zero source and destination offsets
+
+    FLAGS: copy
+    CODE: COPY2
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"\x00" * 1024 + b"B" * 4096 + b"\x00" * 1024
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid, 4096,
+                  src_offset=1024, dst_offset=512, synchronous=1)
+    if count != 4096:
+        fail("Expected to copy 4096 bytes, got %d" % count)
+
+    res = read_file(sess, dst_fh, 512, 4096, dst_stateid)
+    check(res)
+    if res.data != b"B" * 4096:
+        fail("Destination data at offset 512 does not match expected content")
+
+def testAsyncCopy(t, env):
+    """request async copy, poll OFFLOAD_STATUS, verify data
+
+    FLAGS: copy
+    CODE: COPY3
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"C" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    count = _copy(t, sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=0)
+    if count != len(data):
+        fail("Expected to copy %d bytes, got %d" % (len(data), count))
+
+    _verify_data(sess, dst_fh, dst_stateid, data)
 
 def testZeroLengthCopy(t, env):
     """test that zero-length copy copies to EOF
 
     FLAGS: copy
     CODE: COPY5
+    VERS: 2-
     """
     sess1 = env.c1.new_client_session(env.testname(t))
     res = create_file(sess1, env.testname(t))
@@ -21,14 +276,328 @@ def testZeroLengthCopy(t, env):
     fh = res.resarray[-1].object
     stateid = res.resarray[-2].stateid
     data = b"write test data"
-    res = write_file(sess1, fh, data, 0, stateid)
+    _write_data(sess1, fh, stateid, data)
     res = create_file(sess1, env.testname(t)+b"_copy")
+    check(res)
     fh2 = res.resarray[-1].object
     stateid2 = res.resarray[-2].stateid
-    copy = [op.putfh(fh), op.savefh(), op.putfh(fh2),
-            op.copy(stateid, stateid2, 0, 0, 0, 0, 1, [])]
-    res = sess1.compound(copy)
-    check(res)
-    l = res.resarray[-1].cr_response.wr_count
+    # ca_count 0 copies to EOF; any follow-up after a short copy names
+    # the remaining count.
+    l = _copy(t, sess1, fh, stateid, fh2, stateid2, len(data), count=0,
+              synchronous=1)
     if l != len(data):
         fail("Copy to end of %d-byte file copied %d bytes" % (len(data), l))
+
+def testAsyncCopyOffloadStatusAfterComplete(t, env):
+    """verify OFFLOAD_STATUS works after async copy completes
+
+    RFC 7862 Section 4.8: the copy stateid stays valid until the client
+    replies to CB_OFFLOAD (or sends OFFLOAD_CANCEL), so OFFLOAD_STATUS
+    must keep working after the copy completes until then.  Once the
+    client has replied, the server may free it, and the test is reported
+    as unsupported.  The pause before the re-query gives a server that
+    discards completed copies too early (such as the Linux reaper with
+    an inverted TTL check) a chance to do so.
+
+    FLAGS: copy
+    CODE: COPY6
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"D" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   count=len(data), synchronous=0)
+    check(res)
+    cr = res.resarray[-1]
+
+    if not _is_async(cr):
+        t.fail_support("server completed the copy synchronously, so there "
+                       "is no copy stateid to query")
+
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+    _wait_for_copy(sess, dst_fh, copy_stateid)
+
+    # Copy is done. Wait a bit then re-query -- state should still be valid.
+    time.sleep(5)
+
+    res = _offload_status(sess, dst_fh, copy_stateid)
+    if (res.status == NFS4ERR_BAD_STATEID and
+            copy_stateid.other in sess.c.cb_offload):
+        t.fail_support("server freed the copy stateid after the client "
+                       "replied to CB_OFFLOAD")
+    check(res, msg="OFFLOAD_STATUS after completion should still succeed")
+    recheck = res.resarray[-1]
+    if not recheck.osr_complete:
+        fail("OFFLOAD_STATUS lost completion status")
+    if recheck.osr_complete[0] != NFS4_OK:
+        fail("OFFLOAD_STATUS completion changed to error: %s" %
+             _errname(recheck.osr_complete[0]))
+
+def testOffloadCancel(t, env):
+    """start an async copy and cancel it with OFFLOAD_CANCEL
+
+    RFC 7862 Section 4.1.2: a server whose COPY returns a stateid MUST
+    support OFFLOAD_CANCEL.  A successful cancel returns the copy stateid
+    (Section 4.8), so OFFLOAD_STATUS must then either reject it or
+    report the copy complete.
+
+    FLAGS: copy
+    CODE: COPY7
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    data = b"E" * (1024 * 1024)
+    _write_data(sess, src_fh, src_stateid, data)
+
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, dst_stateid,
+                   count=len(data), synchronous=0)
+    check(res)
+    cr = res.resarray[-1]
+
+    if not _is_async(cr):
+        t.fail_support("server completed the copy synchronously, so there "
+                       "is no copy to cancel")
+
+    copy_stateid = cr.cr_response.wr_callback_id[0]
+
+    ops = [op.putfh(dst_fh), op.offload_cancel(copy_stateid)]
+    res = sess.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_COMPLETE_ALREADY], msg="OFFLOAD_CANCEL")
+    if res.status == NFS4ERR_COMPLETE_ALREADY:
+        return
+
+    res = _offload_status(sess, dst_fh, copy_stateid)
+    check(res, [NFS4_OK, NFS4ERR_BAD_STATEID],
+          msg="OFFLOAD_STATUS after OFFLOAD_CANCEL")
+    if res.status == NFS4_OK and not res.resarray[-1].osr_complete:
+        fail("OFFLOAD_STATUS reports the copy still running after "
+             "OFFLOAD_CANCEL")
+
+def testCopyBadSourceStateid(t, env):
+    """COPY with an invalid source stateid should fail
+
+    FLAGS: copy
+    CODE: COPY8
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    _write_data(sess, src_fh, src_stateid, b"data" * 256)
+    dst_fh, dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, _bad_stateid(), dst_fh, dst_stateid,
+                   count=1024, synchronous=1)
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad source stateid")
+
+def testCopyBadDestStateid(t, env):
+    """COPY with an invalid destination stateid should fail
+
+    FLAGS: copy
+    CODE: COPY9
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    _write_data(sess, src_fh, src_stateid, b"data")
+    dst_fh, _dst_stateid = _create_and_open(sess, env.testname(t) + b"_dst")
+
+    res = _do_copy(sess, src_fh, src_stateid, dst_fh, _bad_stateid(),
+                   count=4, synchronous=1)
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY with bad dest stateid")
+
+def testOffloadStatusNoState(t, env):
+    """OFFLOAD_STATUS with a fabricated stateid should fail
+
+    FLAGS: copy
+    CODE: COPY10
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, _stateid = _create_and_open(sess, env.testname(t))
+
+    ops = [op.putfh(src_fh), op.offload_status(_bad_stateid())]
+    res = sess.compound(ops)
+    check(res, NFS4ERR_BAD_STATEID, msg="OFFLOAD_STATUS with bad stateid")
+
+def testCopySameFile(t, env):
+    """COPY with the same source and destination file must fail
+
+    RFC 7862 Section 15.2.3: if SAVED_FH and CURRENT_FH refer to the
+    same file, COPY MUST fail with NFS4ERR_INVAL, whether or not the
+    ranges overlap (unlike CLONE, which only forbids overlap).  The
+    copy is asynchronous so NFS4ERR_OFFLOAD_NO_REQS is not a valid
+    alternative.
+
+    FLAGS: copy
+    CODE: COPY11
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    fh, stateid = _create_and_open(sess, env.testname(t))
+    _write_data(sess, fh, stateid, b"F" * 4096)
+
+    res = _do_copy(sess, fh, stateid, fh, stateid,
+                   src_offset=0, dst_offset=8192, count=4096, synchronous=0)
+    check(res, NFS4ERR_INVAL, msg="COPY with SAVED_FH == CURRENT_FH")
+
+def testCopyNotify(t, env):
+    """COPY_NOTIFY authorizes a destination server to copy from the source
+
+    A client wanting an inter-server copy first sends COPY_NOTIFY to the
+    source server (CURRENT_FH = source file) naming the destination server.
+    The source returns a stateid and a list of netlocs the destination
+    should use to reach it; the client then hands these to the destination
+    server's COPY.  This exercises the source-server half against a single
+    server.
+
+    FLAGS: copy
+    CODE: CPNOTIFY1
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+    _write_data(sess, src_fh, src_stateid, b"copy notify test data")
+
+    ops = [op.putfh(src_fh),
+           op.copy_notify(src_stateid, _server_netloc(env))]
+    res = sess.compound(ops)
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP], msg="COPY_NOTIFY")
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+
+    cnr = res.resarray[-1]
+    # The client needs at least one netloc telling the destination how to
+    # reach the source.
+    if not cnr.cnr_source_server:
+        fail("COPY_NOTIFY returned an empty cnr_source_server list")
+
+def testCopyNotifyBadStateid(t, env):
+    """COPY_NOTIFY with an invalid source stateid should fail
+
+    FLAGS: copy
+    CODE: CPNOTIFY2
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, _src_stateid = _create_and_open(sess, env.testname(t))
+
+    ops = [op.putfh(src_fh),
+           op.copy_notify(_bad_stateid(), _server_netloc(env))]
+    res = sess.compound(ops)
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+    check(res, NFS4ERR_BAD_STATEID, msg="COPY_NOTIFY with bad source stateid")
+
+def testCopyNotifyUnsupportedNetloc(t, env):
+    """COPY_NOTIFY with a name or URL netloc must not return NFS4ERR_BADXDR
+
+    NL4_NAME and NL4_URL are well-formed XDR, so a server that does not
+    support them must not reject the operation with NFS4ERR_BADXDR (which
+    is reserved for XDR that cannot be decoded).  It may return
+    NFS4ERR_NOTSUPP or NFS4ERR_INVAL instead, and a server that does
+    support them may return NFS4_OK.
+
+    FLAGS: copy
+    CODE: CPNOTIFY4
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    src_fh, src_stateid = _create_and_open(sess, env.testname(t))
+
+    for name, nl in [("NL4_NAME", netloc4(NL4_NAME, nl_name=b"nfs.example.org")),
+                     ("NL4_URL", netloc4(NL4_URL,
+                                         nl_url=b"nfs://nfs.example.org/"))]:
+        res = sess.compound([op.putfh(src_fh),
+                             op.copy_notify(src_stateid, nl)])
+        if res.status == NFS4ERR_BADXDR:
+            fail("COPY_NOTIFY with a %s netloc returned NFS4ERR_BADXDR, "
+                 "but the netloc is well-formed XDR" % name)
+        check(res, [NFS4_OK, NFS4ERR_NOTSUPP, NFS4ERR_INVAL],
+              msg="COPY_NOTIFY with a %s netloc" % name)
+
+def testCopyNotifyNoFh(t, env):
+    """COPY_NOTIFY without a current filehandle should fail
+
+    FLAGS: copy
+    CODE: CPNOTIFY3
+    VERS: 2-
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+
+    ops = [op.copy_notify(env.stateid0, _server_netloc(env))]
+    res = sess.compound(ops)
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Server does not support COPY_NOTIFY "
+                       "(inter-server copy source)")
+    check(res, NFS4ERR_NOFILEHANDLE, msg="COPY_NOTIFY with no filehandle")
+
+def testInterServerCopy(t, env):
+    """server-to-server (inter-server) COPY across two servers
+
+    Requires a second server: pass --server2 SERVER:/PATH.  The source file
+    is created on the second server (env.c2, the copy source) and the
+    destination file on the primary server (env.c1, the copy destination).
+    The client issues COPY_NOTIFY to the source to authorize the destination,
+    then COPY to the destination naming the source via ca_source_server.
+
+    FLAGS: copy
+    CODE: INTERCOPY1
+    VERS: 2-
+    """
+    if env.c2 is None:
+        t.fail_support("No second server configured "
+                       "(pass --server2 SERVER:/PATH to enable)")
+
+    # Source file on the second server (the copy source).
+    src_sess = env.c2.new_client_session(env.testname(t) + b"_src")
+    src_fh, src_stateid = _create_and_open(src_sess, env.testname(t))
+    data = b"inter-server copy payload " * 4096
+    _write_data(src_sess, src_fh, src_stateid, data)
+
+    # Ask the source to authorize the primary server as the copy destination.
+    dest_netloc = _server_netloc(env)   # names the primary server (env.c1)
+    res = src_sess.compound([op.putfh(src_fh),
+                             op.copy_notify(src_stateid, dest_netloc)])
+    check(res, [NFS4_OK, NFS4ERR_NOTSUPP], msg="COPY_NOTIFY on source server")
+    if res.status == NFS4ERR_NOTSUPP:
+        t.fail_support("Source server does not support COPY_NOTIFY")
+    cnr = res.resarray[-1]
+    copy_src_stateid = cnr.cnr_stateid
+    source_server = cnr.cnr_source_server
+    if not source_server:
+        fail("COPY_NOTIFY returned an empty cnr_source_server list")
+
+    # Destination file on the primary server (the copy destination).
+    dst_sess = env.c1.new_client_session(env.testname(t) + b"_dst")
+    dst_fh, dst_stateid = _create_and_open(dst_sess, env.testname(t))
+
+    # COPY to the destination, naming the source via ca_source_server.
+    # Inter-server copy is asynchronous on the Linux server (a synchronous
+    # request returns NFS4ERR_NOTSUPP), so ask for async.
+    # No ca_consecutive or ca_synchronous requirement is set, so
+    # NFS4ERR_OFFLOAD_NO_REQS is not a valid refusal here.
+    refusals = [NFS4ERR_NOTSUPP, NFS4ERR_OFFLOAD_DENIED,
+                NFS4ERR_PARTNER_NOTSUPP]
+    def check_reply(res):
+        check(res, [NFS4_OK] + refusals, msg="inter-server COPY")
+        if res.status in refusals:
+            t.fail_support("Destination server does not support "
+                           "inter-server COPY (%s)" % nfsstat4[res.status])
+    count = _copy(t, dst_sess, src_fh, copy_src_stateid, dst_fh, dst_stateid,
+                  len(data), synchronous=0, source_server=source_server,
+                  check_reply=check_reply)
+    if count != len(data):
+        fail("Inter-server copy expected %d bytes, got %d" %
+             (len(data), count))
+
+    _verify_data(dst_sess, dst_fh, dst_stateid, data)
