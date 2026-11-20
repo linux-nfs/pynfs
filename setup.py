@@ -37,8 +37,8 @@ setup(name = "pynfs",
       author = "Fred Isaman",
       author_email = "iisaman@citi.umich.edu",
       maintainer = "Calum Mackay",
-      maintainer_email = "calum.mackay@oracle.com",
-      url = "https://linux-nfs.org/wiki/index.php/Pynfs",
+      maintainer_email = "calum.mackay@cdmnet.org",
+      url = "https://github.com/linux-nfs/pynfs",
       license = "GPL"
       
       )
