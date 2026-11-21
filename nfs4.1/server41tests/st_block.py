@@ -224,7 +224,9 @@ def testRWExtentsContiguous(t, env):
     rules in RFC 5663 section 2.3.1: no extent is PNFS_BLOCK_NONE_DATA,
     the extents are ordered by offset, the writable extents (all but
     PNFS_BLOCK_READ_DATA) are logically contiguous, and the first extent
-    contains the requested offset.  A
+    contains the requested offset.  These rules are checked per layout,
+    so check also that successive layouts in logr_layout leave no gap
+    or overlap (RFC 8881 section 18.43.3).  A
     server that maps each extent in full can return the extent that the
     allocation merges with the ones before it, overlapping them.  The
     minimum length is one block, so that a server that returns one
@@ -261,7 +263,12 @@ def testRWExtentsContiguous(t, env):
     check(res)
     found = False
     blocks = {}
-    for layout in res.resarray[-1].logr_layout:
+    layouts = res.resarray[-1].logr_layout
+    for a, b in zip(layouts, layouts[1:]):
+        if b.lo_offset != a.lo_offset + a.lo_length:
+            fail("Layouts %d+%d and %d+%d leave a gap or overlap" %
+                 (a.lo_offset, a.lo_length, b.lo_offset, b.lo_length))
+    for layout in layouts:
         p = BlockUnpacker(layout.loc_body)
         opaque = p.unpack_pnfs_block_layout4()
         p.done()
