@@ -6,7 +6,7 @@ from .environment import check, fail, create_file, use_obj, \
     get_blocksize
 from block import Packer as BlockPacker, Unpacker as BlockUnpacker, \
     PNFS_BLOCK_READWRITE_DATA, PNFS_BLOCK_READ_DATA, \
-    pnfs_block_layoutupdate4, pnfs_block_extent4
+    PNFS_BLOCK_NONE_DATA, pnfs_block_layoutupdate4, pnfs_block_extent4
 from nfs4lib import FancyNFS4Packer, get_nfstime
 
 
@@ -220,10 +220,11 @@ def testSplitCommit(t, env):
 def testRWExtentsContiguous(t, env):
     """RW layout over a hole between allocated blocks has contiguous extents
 
-    The server allocates the hole for the layout.  Check three of the
-    rules in RFC 5663 section 2.3.1: the extents are ordered by offset,
-    the writable extents (all but PNFS_BLOCK_READ_DATA) are logically
-    contiguous, and the first extent contains the requested offset.  A
+    The server allocates the hole for the layout.  Check four of the
+    rules in RFC 5663 section 2.3.1: no extent is PNFS_BLOCK_NONE_DATA,
+    the extents are ordered by offset, the writable extents (all but
+    PNFS_BLOCK_READ_DATA) are logically contiguous, and the first extent
+    contains the requested offset.  A
     server that maps each extent in full can return the extent that the
     allocation merges with the ones before it, overlapping them.  The
     minimum length is one block, so that a server that returns one
@@ -271,6 +272,10 @@ def testRWExtentsContiguous(t, env):
         if not ext:
             fail("No extents in layout %d+%d" %
                  (layout.lo_offset, layout.lo_length))
+        for e in ext:
+            if e[2] == PNFS_BLOCK_NONE_DATA:
+                fail("Extent %s in an RW layout is PNFS_BLOCK_NONE_DATA" %
+                     (e,))
         for a, b in zip(ext, ext[1:]):
             if b[0] < a[0] or (b[0] == a[0] and
                                a[2] != PNFS_BLOCK_READ_DATA and
