@@ -231,8 +231,9 @@ def testRWExtentsContiguous(t, env):
     allocation merges with the ones before it, overlapping them.  The
     minimum length is one block, so that a server that returns one
     extent per LAYOUTGET does not have to refuse the request.  Warn if
-    the layout does not cover the three blocks or they are not contiguous
-    on the volume, as then no merge could be seen.
+    DEALLOCATE reduces space_used by less than a block, if the layout
+    does not cover the three blocks, or if they are not contiguous on the
+    volume, as then no merge could be seen.
 
     FLAGS: block
     CODE: BLOCK5
@@ -248,14 +249,23 @@ def testRWExtentsContiguous(t, env):
     # the server allocates for the hole is likely to be that one, and to
     # merge with both neighbours.  (On Linux nfsd over XFS the freed block
     # can be reused at once on a sync export, where DEALLOCATE commits.)
-    res = sess.compound([op.putfh(fh), op.allocate(open_stateid, 0, 3*bs)])
+    res = sess.compound([op.putfh(fh), op.allocate(open_stateid, 0, 3*bs),
+                         op.getattr(1 << FATTR4_SPACE_USED)])
     if res.status == NFS4ERR_NOTSUPP:
         t.fail_support("ALLOCATE is not supported")
     check(res)
-    res = sess.compound([op.putfh(fh), op.deallocate(open_stateid, bs, bs)])
+    used = res.resarray[-1].obj_attributes.get(FATTR4_SPACE_USED)
+    res = sess.compound([op.putfh(fh), op.deallocate(open_stateid, bs, bs),
+                         op.getattr(1 << FATTR4_SPACE_USED)])
     if res.status == NFS4ERR_NOTSUPP:
         t.fail_support("DEALLOCATE is not supported")
     check(res)
+    # A server that cannot deallocate the block zeroes it instead
+    # (RFC 7862 section 15.4.3), and then there is no hole to allocate.
+    freed = None
+    attrs = res.resarray[-1].obj_attributes
+    if used is not None and FATTR4_SPACE_USED in attrs:
+        freed = used - attrs[FATTR4_SPACE_USED]
     ops = [op.putfh(fh),
            op.layoutget(False, LAYOUT4_BLOCK_VOLUME, LAYOUTIOMODE4_RW,
                         0, 3*bs, bs, open_stateid, 0xffff)]
@@ -308,6 +318,9 @@ def testRWExtentsContiguous(t, env):
                                  e.bex_storage_offset + i*bs - off)
     if not found:
         fail("No layout contains offset 0")
+    if freed is not None and freed < bs:
+        t.pass_warn("DEALLOCATE freed %d bytes, less than a block, so "
+                    "there was no hole to allocate" % freed)
     if len(blocks) < 3:
         t.pass_warn("The layout does not cover all three blocks, so a "
                     "merge could not be seen")
