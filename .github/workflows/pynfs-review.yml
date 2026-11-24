@@ -1,0 +1,163 @@
+name: pynfs-review
+
+# Check the tests in a pull request against the NFSv4 RFCs with the
+# pynfs-review skill in .claude/skills/. The review runs only on a
+# pull request that carries the pynfs-review label: once when the
+# label is added, and again after each push while it stays on.
+#
+# This file does not create the label. A maintainer creates it once
+# in the repository, for example with `gh label create pynfs-review`.
+on:
+  pull_request:
+    types: [labeled, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # GitHub withholds repository secrets from pull requests opened
+    # from a fork, so the review runs only on branches pushed to
+    # this repository. Adding any other label also fires the
+    # "labeled" event; the label name check skips those.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      ((github.event.action == 'labeled' &&
+        github.event.label.name == 'pynfs-review') ||
+       (github.event.action != 'labeled' &&
+        contains(github.event.pull_request.labels.*.name, 'pynfs-review')))
+    # Job-level, so that a skipped run for an unrelated label does
+    # not cancel a review in progress.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Full history, so the review can walk each commit in the PR.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The skill reads spec text from plaintext RFCs, never from
+      # memory. rfc-editor.org serves RFCs from Cloudflare, and the
+      # whole set is about 1 MB gzipped, so fetch all of it on
+      # every run rather than caching it or choosing per PR. Keep
+      # this list in step with the table in
+      # .claude/skills/pynfs-review/references/spec-map.md, less
+      # RFC 5661: RFC 8881 obsoletes it, and the skill reads it only
+      # when a test comment cites it.
+      - name: Fetch the RFCs the review cites
+        run: |
+          work="$RUNNER_TEMP/pynfs-review"
+          mkdir -p "$work/rfcs"
+          rfcs="1094 1813 2119 2203 4506 5403 5531 5662 5663 7530
+                7531 7862 7863 8174 8178 8276 8434 8435 8881 9289
+                9754"
+          args=()
+          for n in $rfcs; do
+            args+=(-o "$work/rfcs/rfc$n.txt"
+                   "https://www.rfc-editor.org/rfc/rfc$n.txt")
+          done
+          curl -sS --fail --retry 3 --compressed --parallel --parallel-max 8 "${args[@]}"
+          for n in $rfcs; do
+            if [ ! -s "$work/rfcs/rfc$n.txt" ]; then
+              echo "::error::RFC $n did not download"
+              exit 1
+            fi
+          done
+          echo "PYNFS_REVIEW_DIR=$work" >> "$GITHUB_ENV"
+          echo "PYNFS_RFC_DIR=$work/rfcs" >> "$GITHUB_ENV"
+
+      # The action does not run a slash command given as its prompt
+      # (anthropics/claude-code-action#1003), so the prompt asks Claude
+      # to invoke the skill through the Skill tool instead. The
+      # action hides Claude's output, so the report goes to a file
+      # that the next steps post.
+      - uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        id: review
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: >-
+            Use the Skill tool to run the pynfs-review skill with the
+            argument "${{ github.event.pull_request.number }}". The RFC
+            cache is ${{ env.PYNFS_RFC_DIR }}; every RFC the skill's
+            spec map names is already there except RFC 5661, which
+            cannot be fetched here. If a test cites RFC 5661, find
+            the matching RFC 8881 text, and if none exists, list the
+            citation as an open question. When the review is done,
+            use the Write tool to save the complete report, in the
+            three-part shape the skill's report.md gives, to
+            ${{ env.PYNFS_REVIEW_DIR }}/report.md. Leave out the
+            closing line about /code-review; another workflow runs it.
+          claude_args: >-
+            --model claude-sonnet-5-5
+            --add-dir ${{ env.PYNFS_REVIEW_DIR }}
+            --allowedTools
+            "Skill,Read,Grep,Glob,Write,Bash(git remote -v),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(grep:*),Bash(sed -n:*),Bash(tr:*),Bash(sort:*)"
+
+      # A run in which Claude never invokes the skill still exits
+      # successfully. Fail the job when the execution log holds no
+      # Skill tool call for pynfs-review, or no report was written.
+      - name: Check that the review ran
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: |
+          if ! jq -e '[.[] | select(.type == "assistant")
+                | .message.content[]?
+                | select(.type == "tool_use" and .name == "Skill"
+                         and .input.skill == "pynfs-review")]
+                | length > 0' "$EXECUTION_FILE" > /dev/null; then
+            echo "::error::Claude did not invoke the pynfs-review skill"
+            exit 1
+          fi
+          if [ ! -s "$PYNFS_REVIEW_DIR/report.md" ]; then
+            echo "::error::Claude did not write the review report"
+            exit 1
+          fi
+
+      # One comment per pull request, updated in place on each run,
+      # so pushes to a labeled PR do not pile up review comments.
+      - name: Post the report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LC_ALL: C.UTF-8
+        run: |
+          # GitHub rejects a comment body longer than 65536
+          # characters. The job summary holds the full report, and
+          # the comment carries at most its first 60000 characters.
+          cat "$PYNFS_REVIEW_DIR/report.md" >> "$GITHUB_STEP_SUMMARY"
+          report="$(cat "$PYNFS_REVIEW_DIR/report.md")"
+          max=60000
+          if [ "${#report}" -gt "$max" ]; then
+            run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            report="${report:0:$max}"$'\n\n'"(Report truncated. The full text is in the [job summary]($run).)"
+          fi
+          marker='<!-- pynfs-review -->'
+          body="$(printf '%s\n**pynfs-review** of %s\n\n%s' "$marker" "$HEAD_SHA" "$report")"
+          id=$(gh api --paginate \
+                 "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+                 --jq '.[] | select(.user.login == "github-actions[bot]")
+                       | select(.body | startswith("<!-- pynfs-review -->"))
+                       | .id' | tail -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" \
+              -f body="$body" > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+              -f body="$body" > /dev/null
+          fi
+
+      # The action hides Claude's output, so a failed run otherwise
+      # leaves no error text. Print only the final result message.
+      - name: Show why the review failed
+        if: failure() && steps.review.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: |
+          jq -r '.[] | select(.type == "result") | .result // empty' \
+            "$EXECUTION_FILE"
