@@ -226,14 +226,14 @@ def testRWExtentsContiguous(t, env):
     PNFS_BLOCK_READ_DATA) are logically contiguous, and the first extent
     contains the requested offset.  These rules are checked per layout,
     so check also that successive layouts in logr_layout leave no gap
-    or overlap (RFC 8881 section 18.43.3).  A
-    server that maps each extent in full can return the extent that the
-    allocation merges with the ones before it, overlapping them.  The
-    minimum length is one block, so that a server that returns one
-    extent per LAYOUTGET does not have to refuse the request.  Warn if
-    DEALLOCATE reduces space_used by less than a block, if the layout
-    does not cover the three blocks, or if they are not contiguous on the
-    volume, as then no merge could be seen.
+    or overlap (RFC 8881 section 18.43.3).  A server that maps each
+    extent in full can return the extent that the allocation merges
+    with the ones before it, overlapping them.  The minimum length is
+    one block, so that a server that returns one extent per LAYOUTGET
+    does not have to refuse the request.  Warn if DEALLOCATE reduces
+    space_used by less than a block, if the layout does not cover the
+    three blocks, or if they are not contiguous on the volume, as then
+    no merge could be seen.
 
     FLAGS: block
     CODE: BLOCK5
@@ -241,6 +241,8 @@ def testRWExtentsContiguous(t, env):
     """
     sess = env.c1.new_pnfs_client_session(env.testname(t))
     bs = get_blocksize(sess, use_obj(env.opts.path))
+    if bs <= 0:
+        fail("layout_blksize is %d" % bs)
     res = create_file(sess, env.testname(t))
     check(res)
     fh = res.resarray[-1].object

@@ -672,6 +672,8 @@ def get_blocksize(sess, path, layout_type=LAYOUT4_BLOCK_VOLUME):
         fail("fs_layout_type not available")
     if LAYOUT4_BLOCK_VOLUME not in attrdict[FATTR4_FS_LAYOUT_TYPES]:
         fail("layout_type does not contain BLOCK")
+    if FATTR4_LAYOUT_BLKSIZE not in attrdict:
+        unsupported("layout_blksize not available")
     return attrdict[FATTR4_LAYOUT_BLKSIZE]
 
 def _getname(owner, path):
