@@ -284,8 +284,6 @@ def testRWExtentsContiguous(t, env):
         p.done()
         ext = [(e.bex_file_offset, e.bex_length, e.bex_state)
                for e in opaque.blo_extents]
-        print(layout.lo_offset, layout.lo_length, ext,
-              [e.bex_storage_offset for e in opaque.blo_extents])
         if not ext:
             fail("No extents in layout %d+%d" %
                  (layout.lo_offset, layout.lo_length))
@@ -318,13 +316,17 @@ def testRWExtentsContiguous(t, env):
                                  e.bex_storage_offset + i*bs - off)
     if not found:
         fail("No layout contains offset 0")
+    # pass_warn() raises, so collect every warning and report them together.
+    warnings = []
     if freed is not None and freed < bs:
-        t.pass_warn("DEALLOCATE freed %d bytes, less than a block, so "
-                    "there was no hole to allocate" % freed)
+        warnings.append("DEALLOCATE freed %d bytes, less than a block, so "
+                        "there was no hole to allocate" % freed)
     if len(blocks) < 3:
-        t.pass_warn("The layout does not cover all three blocks, so a "
-                    "merge could not be seen")
-    if blocks[0][0] != blocks[1][0] or blocks[1][0] != blocks[2][0] or \
-       blocks[1][1] != blocks[0][1] + bs or blocks[2][1] != blocks[1][1] + bs:
-        t.pass_warn("The three blocks are not contiguous on the volume, "
-                    "so there were no extents to merge")
+        warnings.append("The layout does not cover all three blocks, so a "
+                        "merge could not be seen")
+    elif blocks[0][0] != blocks[1][0] or blocks[1][0] != blocks[2][0] or \
+         blocks[1][1] != blocks[0][1] + bs or blocks[2][1] != blocks[1][1] + bs:
+        warnings.append("The three blocks are not contiguous on the volume, "
+                        "so there were no extents to merge")
+    if warnings:
+        t.pass_warn("; ".join(warnings))
