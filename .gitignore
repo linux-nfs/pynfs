@@ -3,6 +3,9 @@
 .*
 !.gitignore
 !.github/
+!.claude/
+.claude/*
+!.claude/skills/
 
 # Generated files
 *.pyc
