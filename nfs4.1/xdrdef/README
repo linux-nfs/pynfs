@@ -1,4 +1,20 @@
 # Note nfs4.x was created using:
 
-curl http://www.ietf.org/id/draft-ietf-nfsv4-minorversion2-dot-x-38.txt|grep "^  *///" | sed 's?^  */// ??' | sed 's?^  *///$??' >nfs4.1/xdrdef/nfs4.x
-patch nfs4.1/xdrdef/nfs4.x <nfs4.1/xdrdef/nfs4.x.diff 
+curl https://www.ietf.org/archive/id/draft-ietf-nfsv4-minorversion2-dot-x-38.txt|grep "^  *///" | sed 's?^  */// ??' | sed 's?^  *///$??' >nfs4.1/xdrdef/nfs4.x
+patch nfs4.1/xdrdef/nfs4.x <nfs4.1/xdrdef/nfs4.x.diff
+
+The draft was later published as RFC 7863.
+
+Since then, nfs4.x has been edited by hand, and nfs4.x.diff does not
+record those edits. Running the commands above produces a file that
+lacks them. The hand edits are:
+
+- fattr4_sec_label is no longer an array, to match RFC 7863
+  (commit 12115bb8ad0d)
+- the Flex Files layout type, from a draft that became RFC 8435
+  (commit ab4734fffce8)
+- extended attributes, RFC 8276 (commit 43ce9b9589e1)
+- the delstid draft (commit 791a45477fbe)
+- NOTIFY4_GFLAG_EXTEND (commit 37a2cd525931)
+
+To change nfs4.x, edit it directly.
